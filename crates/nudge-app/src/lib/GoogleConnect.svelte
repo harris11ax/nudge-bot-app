@@ -1,0 +1,83 @@
+<script>
+  import { onMount } from "svelte";
+  import { googleStatus, googleConnect, listCalendars, setCalendarSelected } from "./api.js";
+
+  // 10a: OAuth plumbing (google/mod.rs + oauth.rs). 10b adds the per-calendar
+  // overlay checkboxes below, driving what the Calendar tab renders.
+  let status = $state("not_configured");
+  let connecting = $state(false);
+  let error = $state("");
+  let calendars = $state(/** @type {Array} */ ([]));
+
+  async function load() {
+    status = await googleStatus();
+    if (status === "connected") await loadCalendars();
+  }
+
+  async function loadCalendars() {
+    try {
+      calendars = await listCalendars();
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
+  async function connect() {
+    connecting = true;
+    error = "";
+    try {
+      await googleConnect();
+      await load();
+    } catch (err) {
+      error = String(err);
+    } finally {
+      connecting = false;
+    }
+  }
+
+  async function toggle(c) {
+    const next = !c.selected;
+    try {
+      await setCalendarSelected(c.gcal_id, next);
+      c.selected = next;
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
+  onMount(load);
+</script>
+
+<div class="card">
+  <h2>Google</h2>
+  {#if status === "not_configured"}
+    <p class="hint">
+      No OAuth client configured. Create a Desktop-app OAuth client in Google Cloud Console, then
+      save <code>{"{"}"client_id": "...", "client_secret": "..."{"}"}</code> to
+      <code>%LOCALAPPDATA%\nudge-bot\google_client.json</code>.
+    </p>
+  {:else}
+    <p class={status === "connected" ? "ok" : "hint"}>
+      {status === "connected" ? "Connected" : "Not connected"}
+    </p>
+    <button class="primary" onclick={connect} disabled={connecting}>
+      {connecting ? "Waiting for sign-in…" : status === "connected" ? "Reconnect" : "Connect Google"}
+    </button>
+    {#if status === "connected" && calendars.length > 0}
+      <h3 class="cal-settings-h">Overlay on Calendar tab</h3>
+      <ul class="cal-checklist">
+        {#each calendars as c (c.gcal_id)}
+          <li>
+            <label>
+              <input type="checkbox" checked={c.selected} onchange={() => toggle(c)} />
+              <span class="cal-swatch" style={c.bg_color ? `background:${c.bg_color}` : ""}></span>
+              {c.summary || c.gcal_id}
+              {#if c.is_primary}<span class="chip">primary</span>{/if}
+            </label>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  {/if}
+  {#if error}<p class="error">{error}</p>{/if}
+</div>

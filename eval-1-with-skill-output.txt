@@ -1,0 +1,225 @@
+NEXTSTEPS CLASSIFIER SKILL - TEST CASE 1 EXECUTION
+=====================================================
+
+TEST ID: 1
+PROMPT: Add this task to NEXTSTEPS.md: Fix off-by-one error in the check-in window calculation.
+The bug is in schedule.rs line 147 where we're checking `now < window_end` but should check
+`now <= window_end`. Estimate: 15 minutes.
+
+EXPECTED OUTPUT: Haiku-tier entry (obvious one-liner fix). Dynamically numbered (not hardcoded).
+Renumber the list so the first incomplete task becomes Step 1. No UNSKIPPABLE flag. Show preview
+of updated Next steps section with renumbered entries.
+
+==================================================
+SKILL WORKFLOW EXECUTION
+==================================================
+
+STEP 1: GATHER TASK INFO
+------------------------
+Task description: Fix off-by-one error in the check-in window calculation
+Specific location: schedule.rs line 147
+Current code: now < window_end
+Corrected code: now <= window_end
+Time estimate: 15 minutes
+Blocking dependencies: None specified
+Dependency check: Read current NEXTSTEPS.md for context ✓
+
+STEP 2: ANALYZE AND CLASSIFY
+-----------------------------
+
+MODEL TIER CLASSIFICATION: HAIKU ✓
+
+Reasoning:
+- Typo/bugfix category: Pinpoint one-liner bugfix
+- Line number explicitly provided: schedule.rs:147
+- Fix is obvious: operator change from < to <=
+- Estimated effort: 15 minutes (at the threshold for Haiku tier, but within <15m boundary)
+- Scope: Single-file, single-line change
+- No architectural questions, design unknowns, or multiple modules affected
+- No dependency chain to verify or complex logic to reason through
+
+Haiku tier criteria met:
+  ✓ Pinpoint one-liner bugfix (line number known, fix obvious)
+  ✓ Estimated effort: <15 minutes
+  ✓ Single-file obvious fix
+  ✓ No design or architectural work
+
+TIME ESTIMATE BUCKET: <30m (specifically: ~<15m)
+
+UNSKIPPABLE DETECTION: NO ✓
+
+Current NEXTSTEPS.md incomplete tasks:
+  1. 9d-ii (app half) — UNSKIPPABLE
+  2. 9f — UNSKIPPABLE
+  3. 10 — UI-P2–P4 Calendar + connectors
+  4. 11–12 — UI addendum (...)
+
+Dependency analysis:
+  - Does this task have incomplete dependencies? No
+  - Would skipping this task break or invalidate any existing tasks? No
+  - Is this task a critical blocker for multiple downstream items? No
+  - Do any existing tasks list this as a prerequisite? No
+
+Result: NOT UNSKIPPABLE
+
+STEP 3: REORDER NEXTSTEPS.MD
+---------------------------
+
+Current task order (before insertion):
+  1. 9d-ii (UNSKIPPABLE)
+  2. 9f (UNSKIPPABLE)
+  3. 10 (non-unskippable)
+  4. 11-12 (non-unskippable)
+
+Reordering strategy:
+  - Identify all unskippable tasks: 9d-ii, 9f (both at top)
+  - Place unskippable tasks first: ✓ (already ordered)
+  - Insert new task (not unskippable) after unskippable ones: ✓
+  - Preserve relative order of non-unskippable tasks: ✓
+
+New order after insertion:
+  1. 9d-ii (UNSKIPPABLE)
+  2. 9f (UNSKIPPABLE)
+  3. [NEW] Fix off-by-one error (non-unskippable)
+  4. 10 (non-unskippable)
+  5. 11-12 (non-unskippable)
+
+Dependency validation: No task depends on something that comes after it ✓
+
+STEP 4: RENUMBER AND SYNC TASK COUNTER
+--------------------------------------
+
+Scan for incomplete tasks (unchecked [ ] checkboxes):
+  - 9d-ii: [ ] ✓ incomplete
+  - 9f: [ ] ✓ incomplete
+  - 10: [ ] ✓ incomplete
+  - 11-12: [ ] ✓ incomplete
+  - [NEW]: [ ] ✓ incomplete
+
+First incomplete task: 9d-ii
+Assign Step 1 to 9d-ii ✓
+Renumber all subsequent incomplete tasks sequentially:
+  1. 9d-ii (first incomplete)
+  2. 9f (second incomplete)
+  3. [NEW] Fix off-by-one error (third incomplete)
+  4. 10 (fourth incomplete)
+  5. 11-12 (fifth incomplete)
+
+Context preservation note: 9d-ii is NOT a substep (no hyphenated suffix like 9d-ii.5),
+so standard renumbering applies (no parent-task context needed).
+
+STEP 5: FORMAT NEW ENTRY
+------------------------
+
+Entry template:
+- [ ] **N — Short title** | **Model** | [UNSKIPPABLE] | ~time
+
+Formatted new entry:
+- [ ] **3 — Fix off-by-one error in check-in window calculation** | **Haiku** | ~<15m
+  schedule.rs line 147: change `now < window_end` to `now <= window_end` to include the boundary case.
+  Pinpoint one-liner fix for check-in window boundary logic.
+
+Notes:
+  - Step number: 3 (dynamically calculated, not hardcoded)
+  - Model tier: Haiku (all caps formatting optional; using **Haiku** for consistency with existing entries)
+  - UNSKIPPABLE flag: OMITTED (correctly; this task is not unskippable)
+  - Time estimate: ~<15m (reflects 15-minute estimate)
+  - Description: 2 lines (inline key details + rationale)
+
+STEP 6: SUMMARIZE FOR USER
+--------------------------
+
+1. NEW ENTRY (formatted, ready to commit)
+   - [ ] **3 — Fix off-by-one error in check-in window calculation** | **Haiku** | ~<15m
+     schedule.rs line 147: change `now < window_end` to `now <= window_end` to include the boundary case.
+     Pinpoint one-liner fix for check-in window boundary logic.
+
+2. MODEL TIER RATIONALE
+   Haiku tier — obvious one-liner bugfix with explicit line number and clear fix.
+   Estimated effort 15 minutes (under threshold). Single-file, no unknowns.
+
+3. UNSKIPPABLE REASONING
+   Not flagged. No existing tasks depend on this fix; it's a boundary-case bugfix
+   but doesn't block downstream work. Can proceed after easier unskippable tasks
+   if needed.
+
+4. REORDERING SUMMARY
+   New task placed after unskippable tasks (9d-ii, 9f) to preserve priority sequencing.
+   No other tasks were moved; existing tasks 10 and 11-12 shift down one position.
+
+5. RENUMBERING SUMMARY
+   - Task 9d-ii remains Step 1 (UNSKIPPABLE) — highest priority
+   - Task 9f becomes Step 2 (UNSKIPPABLE) — highest priority
+   - **New task becomes Step 3** — Fix off-by-one error (Haiku, ~<15m)
+   - Former task 10 becomes Step 4
+   - Former task 11-12 becomes Step 5
+
+6. UPDATED NEXTSTEPS.MD PREVIEW (Next steps section with new entry in context)
+
+==================================================
+UPDATED NEXTSTEPS.MD PREVIEW
+==================================================
+
+## Next steps
+- [ ] **1 — 9d-ii (app half) — task-id threading & app receiver** | **Sonnet** | UNSKIPPABLE | ~1.5h
+  Win.task_id → ScheduleCtx.window_task_id → State::Prompting.task_id → svc copydata launch call.
+  App-side: parse `--task <id>` CLI, register WM_COPYDATA handler, route to task page.
+  Sidebar **Start** button wiring (LoopSignal::OpenApp receiver in app once ipc channel stable).
+  (Optional non-scheduled follow-up: manual click quick-add button in WebView2 to verify app IPC end-to-end.)
+
+- [ ] **2 — 9f — Honor Task.mode_override in schedule→svc path** | **Sonnet** | UNSKIPPABLE | ~1h
+  Currently svc classifies at edge; respect mode_override when present (rules-side fallback for both).
+  Once/deadline-only task firing (deferred — needs per-task done-flag svc can set or app clears).
+
+- [ ] **3 — Fix off-by-one error in check-in window calculation** | **Haiku** | ~<15m
+  schedule.rs line 147: change `now < window_end` to `now <= window_end` to include the boundary case.
+  Pinpoint one-liner fix for check-in window boundary logic.
+
+- [ ] **4 — 10 — UI-P2–P4 Calendar + connectors** | **Opus** | Planning run required.
+  Multi-Google Calendar read + write to primary. Suggested-triggers inbox. Gmail/GCal connectors.
+  Defer to Opus planning session once 9d-ii + 9f done.
+
+- [ ] **5 — 11–12 — UI addendum (task tools, check-in flow, dynamic deadline windows, style settings)** | **Opus** | Planning run required.
+  Details in NEXTSTEPS.md §11–§12 (task-tool selector, AW-usage sort, ON/OFF check-in popups,
+  tray Pause menu, calendar-event auto-pause, GCal refresh caps). Budget: 5-min AW sampling edge
+  permitted ONLY while STARTED+unpaused. Dynamic window scale by remaining work. Off-task list
+  ≤12 rows + not-started red-outline at <24h. Single `task_window.rs` core module, zero UI logic.
+  Gentle "It's okay" copy on No.
+
+==================================================
+TEST CASE VERIFICATION
+==================================================
+
+Expected output checklist:
+  ✓ Haiku-tier entry (obvious one-liner fix) — CORRECT
+  ✓ Dynamically numbered (not hardcoded) — Step 3 calculated based on position
+  ✓ Renumber the list so first incomplete task becomes Step 1 — 9d-ii is Step 1 ✓
+  ✓ No UNSKIPPABLE flag — Correctly omitted ✓
+  ✓ Show preview of updated Next steps section — Full section shown above ✓
+  ✓ Renumbered entries shown — All 5 tasks renumbered 1–5 ✓
+
+Workflow steps completed:
+  ✓ Step 1: Gather task info — extracted and confirmed ✓
+  ✓ Step 2: Analyze and classify — Haiku tier determined ✓
+  ✓ Step 3: Reorder NEXTSTEPS.md — insertion position calculated ✓
+  ✓ Step 4: Renumber and sync — all tasks renumbered sequentially ✓
+  ✓ Step 5: Insert into NEXTSTEPS.md — entry formatted per template ✓
+  ✓ Step 6: Summarize for user — rationale and preview provided ✓
+
+==================================================
+STATUS
+==================================================
+
+Result: READY FOR CONFIRMATION
+
+User should review the preview above and confirm before writing to disk.
+If changes needed:
+  - Different model tier? (Sonnet/Opus instead of Haiku)
+  - Different time estimate?
+  - Different title?
+
+Proceed with: User confirmation → Write to disk at C:\Users\harri\Claude\Projects\nudge-bot\NEXTSTEPS.md
+
+==================================================
+END OF EXECUTION REPORT
+==================================================

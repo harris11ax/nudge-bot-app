@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/nudge-core", "crates/nudge-svc", "crates/nudge-ctl", "crates/nudge-draft"]
+# nudge-helper (elevated) joins the workspace when focus-mode blocking lands.
+# nudge-app (Tauri GUI, P1) is kept OUT of the workspace until `cargo tauri dev`
+# runs green — Tauri deps + its own lockfile must not perturb the resident
+# nudge-svc build/lockfile. Its Rust package lives at crates/nudge-app/src-tauri.
+exclude = ["crates/nudge-app/src-tauri"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[profile.release]
+lto = true
+opt-level = "z"
+panic = "abort"
+strip = true

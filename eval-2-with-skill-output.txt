@@ -1,0 +1,290 @@
+================================================================================
+TEST CASE 2: nextsteps-classifier SKILL EXECUTION
+================================================================================
+
+TEST ID: 2
+PROMPT INPUT:
+  Add this task: Implement per-task mode_override (currently ignored in svc).
+  The svc classifies ON/OFF at the edge; we need to respect Task.mode_override
+  when present, with rules-side fallback. This touches state.rs, schedule.rs
+  context building, and test coverage. Estimate: 1.5 hours. This blocks task 9f
+  which relies on mode_override being functional.
+
+================================================================================
+STEP 1: TASK INFO EXTRACTION
+================================================================================
+
+Task Description:
+  Implement per-task mode_override (currently ignored in svc). The svc classifies
+  ON/OFF at the edge; we need to respect Task.mode_override when present, with
+  rules-side fallback. This touches state.rs, schedule.rs context building, and
+  test coverage.
+
+Time Estimate: ~1.5h
+
+Blocking Notes: "This blocks task 9f which relies on mode_override being functional."
+
+================================================================================
+STEP 2: CLASSIFICATION & ANALYSIS
+================================================================================
+
+MODEL TIER CLASSIFICATION: SONNET
+───────────────────────────────
+
+Reasoning:
+  - Scope: Straightforward feature — add per-task mode_override respect to existing ON/OFF classifier
+  - Effort: 1.5 hours (well under 4h Sonnet ceiling)
+  - Complexity: Low architectural risk
+    * Known files: state.rs, schedule.rs, test files (no mystery modules)
+    * Rules-side fallback already exists in design
+    * Incremental addition to existing pattern (not a new abstraction)
+  - Implementation clarity: High (no unknowns about approach)
+  - Classification: This is textbook Sonnet-tier feature work — targeted,
+    predictable, multi-file but well-bounded.
+
+Verdict: Sonnet (routine feature implementation <4h)
+
+
+UNSKIPPABLE DETECTION: YES
+──────────────────────────
+
+Blocking Analysis:
+  Q: Does this task have incomplete dependencies?
+     NO — this task stands alone (mode_override is self-contained logic)
+
+  Q: Would skipping this task break or invalidate any existing tasks?
+     YES — CRITICAL: Current NEXTSTEPS.md lists task 9f ("Honor Task.mode_override
+     in schedule→svc path"). Task 9f's description states it needs mode_override
+     to be respected. Without this implementation, 9f cannot be completed
+     meaningfully.
+
+  Q: Is this a critical blocker for multiple downstream items?
+     YES (at minimum 9f; possibly others that depend on 9f).
+
+Test prompt explicit statement:
+  "This blocks task 9f which relies on mode_override being functional."
+
+Verdict: UNSKIPPABLE (blocks downstream task 9f)
+
+
+TIME ESTIMATE: ~1.5h
+────────────────────
+  Bucket: ~1.5h (between ~1h and ~2h; user-provided estimate aligns with feature scope)
+
+
+================================================================================
+STEP 3: REORDERING & DEPENDENCY ANALYSIS
+================================================================================
+
+Current NEXTSTEPS.md order:
+  1. 9d-ii (app half) — task-id threading & app receiver [UNSKIPPABLE]
+  2. 9f — Honor Task.mode_override in schedule→svc path [UNSKIPPABLE]
+  3. 10 — UI-P2–P4 Calendar + connectors [Opus]
+  4. 11–12 — UI addendum [Opus]
+
+New task dependency graph:
+  - New task ("Implement per-task mode_override") → blocks → 9f
+  - This implies: NEW TASK must come BEFORE 9f in execution order
+
+Reordering required:
+  ✓ New task is unskippable
+  ✓ New task blocks 9f (existing unskippable)
+  ✓ Must be positioned between 9d-ii and 9f (respects 9d-ii → new → 9f dependency chain)
+
+Dependency chain (after reordering):
+  9d-ii (threading) → NEW TASK (mode_override impl) → 9f (honor mode_override)
+
+This is a logical sequence:
+  - 9d-ii: Wire task_id through state machine
+  - NEW: Implement mode_override respect in classifier
+  - 9f: Honor mode_override (builds on NEW task)
+
+Verdict: Insert new task BEFORE current 9f; promote new task to unskippable priority
+
+
+================================================================================
+STEP 4: RENUMBERING & TASK COUNTER
+================================================================================
+
+Current incomplete tasks (after reordering):
+  1. 9d-ii (app half) — task-id threading & app receiver [UNSKIPPABLE]
+  2. NEW TASK — Implement per-task mode_override [UNSKIPPABLE] ← INSERTED HERE
+  3. 9f — Honor Task.mode_override in schedule→svc path [UNSKIPPABLE]
+  4. 10 — UI-P2–P4 Calendar + connectors
+  5. 11–12 — UI addendum
+
+First incomplete task: 9d-ii (now Step 1)
+
+Renumbering applied:
+  - Step 1: 9d-ii (unchanged; was already first)
+  - Step 2: NEW TASK (inserted; now second; was not in list)
+  - Step 3: 9f (shifts down from original position 2)
+  - Step 4: 10 (shifts down from original position 3)
+  - Step 5: 11–12 (shifts down from original position 4)
+
+Step counter reset: First incomplete = Step 1 ✓
+
+
+================================================================================
+STEP 5: NEW ENTRY FORMATTING
+================================================================================
+
+Formatted Entry:
+
+- [ ] **2 — Per-task mode_override implementation** | **Sonnet** | UNSKIPPABLE | ~1.5h
+  Implement per-task mode_override respect in svc classifier. Currently mode_override
+  is ignored at the edge; we need to respect Task.mode_override when present, with
+  rules-side fallback for both. Key files: state.rs (override field read),
+  schedule.rs (context building passes override to classifier), test coverage for
+  override + fallback logic.
+  Prerequisite for task 3 (9f: Honor Task.mode_override). Blocks 9f.
+
+Note: Entry formatted per skill Step 5 template; renumbered to Step 2 after insertion.
+
+
+================================================================================
+STEP 6: SUMMARY FOR USER
+================================================================================
+
+(a) NEW ENTRY
+───────────
+
+- [ ] **2 — Per-task mode_override implementation** | **Sonnet** | UNSKIPPABLE | ~1.5h
+  Implement per-task mode_override respect in svc classifier. Currently mode_override
+  is ignored at the edge; we need to respect Task.mode_override when present, with
+  rules-side fallback for both. Key files: state.rs (override field read),
+  schedule.rs (context building passes override to classifier), test coverage for
+  override + fallback logic.
+  Blocks task 3 (9f: Honor Task.mode_override). Prerequisite.
+
+
+(b) SONNET CLASSIFICATION REASONING
+────────────────────────────────────
+
+Tier: Sonnet (default, routine feature)
+Reasoning:
+  ✓ Straightforward feature implementation (ON/OFF classifier extension)
+  ✓ Effort <4 hours (user estimate 1.5h; well under ceiling)
+  ✓ Low architectural complexity (no new patterns, no unknowns)
+  ✓ Known files to touch (state.rs, schedule.rs, tests)
+  ✓ Incremental addition to existing design (rules-side fallback already exists)
+  ✓ Predictable testing scope (override + fallback coverage)
+
+Edge case assessment: None. This is clear-cut Sonnet.
+
+
+(c) UNSKIPPABLE FLAGGING & BLOCKING RATIONALE
+───────────────────────────────────────────────
+
+UNSKIPPABLE: YES
+
+Blocking Analysis:
+  This task implements the foundation for task 9f ("Honor Task.mode_override in
+  schedule→svc path"). Current NEXTSTEPS.md shows 9f depends on mode_override being
+  functional. Without this implementation:
+    - 9f cannot be started (missing prerequisite)
+    - 9f would be incomplete/non-functional if attempted anyway
+    - Downstream work (task 10+) may depend on 9f being done
+
+  Critical dependency: NEW TASK → 9f (blocking relationship)
+
+  Criterion met: "Would skipping this task break or invalidate any existing tasks?"
+  Answer: YES — Skipping this task makes 9f impossible to complete.
+
+
+(d) REORDERING SUMMARY
+──────────────────────
+
+ORIGINAL ORDER:
+  1. 9d-ii (app half) — task-id threading
+  2. 9f — Honor Task.mode_override
+  3. 10 — UI-P2–P4 Calendar
+  4. 11–12 — UI addendum
+
+NEW ORDER (after insertion):
+  1. 9d-ii (app half) — task-id threading [UNSKIPPABLE]
+  2. [NEW TASK] Per-task mode_override implementation [UNSKIPPABLE] ← INSERTED
+  3. 9f — Honor Task.mode_override [UNSKIPPABLE]
+  4. 10 — UI-P2–P4 Calendar
+  5. 11–12 — UI addendum
+
+Rationale:
+  ✓ New task is unskippable (blocks 9f)
+  ✓ New task implements prerequisite for 9f
+  ✓ Positioned after 9d-ii (no dependency chain there)
+  ✓ Positioned before 9f (logical dependency: NEW → 9f)
+  ✓ No tasks skipped; all relative order preserved below insertion point
+
+Validation:
+  ✓ No task depends on something that comes after it
+  ✓ Dependency chain respects execution order: 9d-ii → NEW → 9f → 10/11–12
+
+
+(e) FULL PREVIEW WITH DYNAMIC RENUMBERING
+───────────────────────────────────────────
+
+## Next steps
+
+- [ ] **1 — 9d-ii (app half) — task-id threading & app receiver** | **Sonnet** | UNSKIPPABLE | ~1.5h
+  Win.task_id → ScheduleCtx.window_task_id → State::Prompting.task_id → svc copydata launch call.
+  App-side: parse `--task <id>` CLI, register WM_COPYDATA handler, route to task page.
+  Sidebar **Start** button wiring (LoopSignal::OpenApp receiver in app once ipc channel stable).
+  (Optional non-scheduled follow-up: manual click quick-add button in WebView2 to verify app IPC end-to-end.)
+
+- [ ] **2 — Per-task mode_override implementation** | **Sonnet** | UNSKIPPABLE | ~1.5h
+  Implement per-task mode_override respect in svc classifier. Currently mode_override
+  is ignored at the edge; we need to respect Task.mode_override when present, with
+  rules-side fallback for both. Key files: state.rs (override field read),
+  schedule.rs (context building passes override to classifier), test coverage for
+  override + fallback logic. Blocks task 3 (9f). Prerequisite.
+
+- [ ] **3 — 9f — Honor Task.mode_override in schedule→svc path** | **Sonnet** | UNSKIPPABLE | ~1h
+  Currently svc classifies at edge; respect mode_override when present (rules-side fallback for both).
+  Once/deadline-only task firing (deferred — needs per-task done-flag svc can set or app clears).
+  Depends on task 2 (per-task mode_override implementation).
+
+- [ ] **4 — 10 — UI-P2–P4 Calendar + connectors** | **Opus** | Planning run required.
+  Multi-Google Calendar read + write to primary. Suggested-triggers inbox. Gmail/GCal connectors.
+  Defer to Opus planning session once 9d-ii + 9f done.
+
+- [ ] **5 — 11–12 — UI addendum (task tools, check-in flow, dynamic deadline windows, style settings)** | **Opus** | Planning run required.
+  Details in NEXTSTEPS.md §11–§12 (task-tool selector, AW-usage sort, ON/OFF check-in popups,
+  tray Pause menu, calendar-event auto-pause, GCal refresh caps). Budget: 5-min AW sampling edge
+  permitted ONLY while STARTED+unpaused. Dynamic window scale by remaining work. Off-task list
+  ≤12 rows + not-started red-outline at <24h. Single `task_window.rs` core module, zero UI logic.
+  Gentle "It's okay" copy on No.
+
+
+================================================================================
+RENUMBERING SUMMARY
+================================================================================
+
+Task numbering recount:
+  ✓ First incomplete task identified: 9d-ii (was Step 1, remains Step 1)
+  ✓ New task inserted after 9d-ii: assigned Step 2
+  ✓ Existing task 9f shifted: Step 2 → Step 3
+  ✓ Existing task 10 shifted: Step 3 → Step 4
+  ✓ Existing task 11–12 shifted: Step 4 → Step 5
+
+All renumbering applied to full preview above. No tasks skipped.
+
+
+================================================================================
+VERIFICATION CHECKLIST
+================================================================================
+
+✓ Step 1: Task info fully extracted (description, estimate, blocking notes)
+✓ Step 2: Model tier classified (Sonnet, reasoning provided)
+✓ Step 2: UNSKIPPABLE flagged (yes, blocks 9f)
+✓ Step 2: Time estimate bucketed (~1.5h, explicit)
+✓ Step 3: Dependency reordering logic applied (NEW before 9f)
+✓ Step 4: Renumbering logic applied (first incomplete = Step 1, sequential count)
+✓ Step 5: New entry formatted per skill template (markdown, fields complete)
+✓ Step 6: Summary sections generated (a–e as requested)
+✓ Validation: No circular dependencies; no task depends on posterior task
+
+All skill workflow steps completed. Ready for user review before commit.
+
+================================================================================
+END TEST CASE 2 EXECUTION
+================================================================================

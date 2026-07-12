@@ -1,0 +1,161 @@
+{
+  "test_results": [
+    {
+      "test_id": 1,
+      "test_name": "haiku-trivial-bugfix",
+      "prompt": "Fix off-by-one error in check-in window calculation (schedule.rs:147)",
+      "expected_tier": "Haiku",
+      "actual_tier": "Haiku",
+      "pass": true,
+      "assertions": [
+        {
+          "name": "correct_tier_classification",
+          "passed": true,
+          "evidence": "Task correctly identified as pinpoint one-liner fix (<15m), classified Haiku"
+        },
+        {
+          "name": "no_unskippable_flag",
+          "passed": true,
+          "evidence": "No UNSKIPPABLE flag applied (correct; no blocking dependencies)"
+        },
+        {
+          "name": "dynamic_numbering",
+          "passed": true,
+          "evidence": "Task numbered Step 3 (not hardcoded); position calculated based on unskippable tasks"
+        },
+        {
+          "name": "full_renumbering",
+          "passed": true,
+          "evidence": "All 5 tasks renumbered sequentially (1–5); first incomplete = Step 1"
+        },
+        {
+          "name": "preview_provided",
+          "passed": true,
+          "evidence": "Full updated Next steps section shown with new entry in context"
+        }
+      ]
+    },
+    {
+      "test_id": 2,
+      "test_name": "sonnet-blocking-feature",
+      "prompt": "Implement per-task mode_override (blocks task 9f)",
+      "expected_tier": "Sonnet",
+      "actual_tier": "Sonnet",
+      "unskippable": true,
+      "pass": true,
+      "assertions": [
+        {
+          "name": "correct_tier_classification",
+          "passed": true,
+          "evidence": "1.5h feature, single-concern, predictable — correctly classified Sonnet"
+        },
+        {
+          "name": "unskippable_detection",
+          "passed": true,
+          "evidence": "Task correctly flagged UNSKIPPABLE (blocks 9f which depends on mode_override)"
+        },
+        {
+          "name": "blocking_rationale",
+          "passed": true,
+          "evidence": "Dependency analysis identified 9f as downstream blocker; reordered task before 9f"
+        },
+        {
+          "name": "correct_reordering",
+          "passed": true,
+          "evidence": "New task inserted between 9d-ii (1) and 9f (now 3); respects dependency chain"
+        },
+        {
+          "name": "renumbering_accuracy",
+          "passed": true,
+          "evidence": "All tasks renumbered; new task becomes Step 2, existing tasks shift accordingly"
+        }
+      ]
+    },
+    {
+      "test_id": 3,
+      "test_name": "substep-on-parent-task",
+      "prompt": "Add substep 9d-ii.5 (Sidebar Start button wiring) to parent 9d-ii",
+      "expected_tier": "Sonnet",
+      "actual_tier": "Sonnet",
+      "is_substep": true,
+      "pass": true,
+      "assertions": [
+        {
+          "name": "substep_recognition",
+          "passed": true,
+          "evidence": "Skill recognized 9d-ii.5 as a substep (dotted notation); preserved parent context"
+        },
+        {
+          "name": "parent_preservation",
+          "passed": true,
+          "evidence": "Parent task 9d-ii remains Step 1 (UNSKIPPABLE); not reordered"
+        },
+        {
+          "name": "substep_classification",
+          "passed": true,
+          "evidence": "Substep classified Sonnet (<30m wiring task); inherits parent priority"
+        },
+        {
+          "name": "parent_marked_in_progress",
+          "passed": true,
+          "evidence": "Parent marked (IN-PROGRESS) to signal active substep work"
+        },
+        {
+          "name": "context_integration",
+          "passed": true,
+          "evidence": "Substep integrated under parent with full context; downstream tasks renumbered"
+        }
+      ]
+    },
+    {
+      "test_id": 4,
+      "test_name": "opus-architectural-design",
+      "prompt": "Design and implement Settings panel (6–8h, architectural unknowns)",
+      "expected_tier": "Opus",
+      "actual_tier": "Opus",
+      "pass": true,
+      "assertions": [
+        {
+          "name": "edge_case_reasoning",
+          "passed": true,
+          "evidence": "Skill provided deep reasoning for Opus (>4h, state persistence unknowns, design decisions)"
+        },
+        {
+          "name": "design_unknowns_identified",
+          "passed": true,
+          "evidence": "Skill explicitly listed architectural concerns: component hierarchy, state persistence, validation"
+        },
+        {
+          "name": "no_unskippable_flag",
+          "passed": true,
+          "evidence": "Correctly not flagged UNSKIPPABLE (independent UI work; no blocking dependencies)"
+        },
+        {
+          "name": "dynamic_numbering",
+          "passed": true,
+          "evidence": "Task numbered Step 5 (not hardcoded); appended after existing tasks; all renumbered"
+        },
+        {
+          "name": "preview_accuracy",
+          "passed": true,
+          "evidence": "Full preview shown with new task in context; all tasks renumbered 1–5"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "total_tests": 4,
+    "passed": 4,
+    "failed": 0,
+    "pass_rate": 1.0,
+    "critical_features": {
+      "dynamic_numbering": "PASS",
+      "tier_classification": "PASS",
+      "unskippable_detection": "PASS",
+      "blocking_dependency_reorder": "PASS",
+      "substep_handling": "PASS",
+      "context_preservation": "PASS",
+      "full_preview_generation": "PASS"
+    }
+  }
+}

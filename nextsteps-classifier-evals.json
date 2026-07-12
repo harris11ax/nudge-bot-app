@@ -1,0 +1,25 @@
+{
+  "skill_name": "nextsteps-classifier",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Add this task to NEXTSTEPS.md: Fix off-by-one error in the check-in window calculation. The bug is in schedule.rs line 147 where we're checking `now < window_end` but should check `now <= window_end`. Estimate: 15 minutes.",
+      "expected_output": "Haiku-tier entry (obvious one-liner fix). Dynamically numbered (not hardcoded). Renumber the list so the first incomplete task becomes Step 1. No UNSKIPPABLE flag. Show preview of updated Next steps section with renumbered entries."
+    },
+    {
+      "id": 2,
+      "prompt": "Add this task: Implement per-task mode_override (currently ignored in svc). The svc classifies ON/OFF at the edge; we need to respect Task.mode_override when present, with rules-side fallback. This touches state.rs, schedule.rs context building, and test coverage. Estimate: 1.5 hours. This blocks task 9f which relies on mode_override being functional.",
+      "expected_output": "Sonnet-tier entry (straightforward feature, <4h, single-concern). UNSKIPPABLE flag (blocks 9f). Repositioned before task 9f. Renumber all tasks so first incomplete = Step 1. Show full preview with dynamic numbering applied."
+    },
+    {
+      "id": 3,
+      "prompt": "Add a substep: 9d-ii.5 — Sidebar Start button wiring. After task 9d-ii lands, connect the app's task page Start button to the task-launch IPC. Estimate: 30 minutes. Blocked by 9d-ii.",
+      "expected_output": "Sonnet-tier substep (<30m). Parent task 9d-ii remains Step 1 (UNSKIPPABLE). Substep listed under parent with context preserved. Mark parent as 'in progress' if this is a new substep on an UNSKIPPABLE parent. Renumber other independent tasks accordingly."
+    },
+    {
+      "id": 4,
+      "prompt": "Add this task: Design and implement the Settings panel for nudge-app (task tools favorites, hidden list, style/color theme selector, pause menu custom times, calendar auto-pause checkbox, GCal refresh caps). This touches UI architecture, state persistence, component hierarchy. Involves design decisions on grouping, terminology, validation. Estimate: 6-8 hours. This is standalone UI work.",
+      "expected_output": "Opus-tier entry (>4h, architectural + design unknowns). No UNSKIPPABLE flag (independent). Dynamically numbered. Show renumbered Next steps preview with this new task in sequence with others."
+    }
+  ]
+}

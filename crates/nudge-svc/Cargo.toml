@@ -1,0 +1,31 @@
+[package]
+name = "nudge-svc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nudge-core = { path = "../nudge-core" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tray-icon = "0.19"
+# ActivityWatch bridge: blocking HTTP to a localhost service — no TLS, no async
+# runtime (keeps the single-thread, no-tokio design intact).
+ureq = { version = "2", default-features = false, features = ["json"] }
+serde_json = "1"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_Security",
+    "Win32_System_SystemInformation",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
+] }
+
+[[bin]]
+name = "nudge-svc"
+path = "src/main.rs"

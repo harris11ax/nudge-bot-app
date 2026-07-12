@@ -1,0 +1,9 @@
+[package]
+name = "nudge-core"
+version.workspace = true
+edition.workspace = true
+
+# Pure logic: no Win32, no I/O, no clocks. Deterministic and unit-testable.
+[dependencies]
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }

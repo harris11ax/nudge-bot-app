@@ -1,0 +1,184 @@
+SOCIAL TEXT MANAGER - FEATURES SUMMARY
+======================================
+
+CORE PURPOSE
+A Windows desktop application for tracking personal contacts and staying in touch via SMS/MMS. It syncs message history from an Android phone via USB+ADB, maintains a contact database, and enables sending templated check-in texts.
+
+---
+
+CONTACT MANAGEMENT
+==================
+• Add/edit/delete contacts via dashboard form
+• Maintain primary phone number + multiple alternate phones (home, work, etc.)
+• Store email (primary + alternates), home address, notes per contact
+• Import contacts from Google Contacts export (CSV or vCard)
+• Export contacts back to vCard (.vcf) format
+• Push contacts to Android phone via ADB
+• Pause/resume contact tracking (enabled flag)
+• Automatic deduplication on import
+• Phone number normalization (strip formatting for matching)
+• Repair tool for concatenated phone numbers (>15 digits split into two)
+
+---
+
+MESSAGE SYNC & HISTORY
+======================
+• Pull SMS history from Android phone (non-root via content provider)
+• Pull MMS history and group conversations
+• Pull call history from Android call log
+• Import SMS/MMS history from XML backup (SMS Backup & Restore format)
+• Detect and correctly parse group MMS (multi-recipient messages)
+• Avoid message duplication on import (UNIQUE constraint on phone, direction, body, timestamp)
+• Fix for previously fragmented group messages (cleanup tool)
+• Message search and filter by contact
+• Activity log with send history and attachment metadata
+
+---
+
+MESSAGING FEATURES
+==================
+• Send templated SMS to selected contact
+• Send MMS (photos/videos) to contact via Android MMS app
+• Attach 1+ photos/videos to outbound messages
+  - Supported: JPEG, PNG, GIF (max 5 MB each, 10 MB total)
+  - Video: MP4 (carrier and device dependent)
+• Compose custom messages or use default template
+• Manual "Send Now" action or automatic templated sends
+• Non-fatal send failures logged (older Android versions/permissions)
+• Actual MMS send confirmation happens on device
+
+---
+
+CONTACT FREQUENCY TRACKING
+==========================
+• Set configurable "check-in frequency" per contact (e.g., every 30 days)
+• Dashboard highlights stale contacts (not reached within frequency)
+• Last-contact timestamp updates on:
+  - Inbound SMS/MMS/call
+  - Outbound message sent
+  - Manual import
+• Visual distinction for contacts needing attention
+
+---
+
+CONVERSATION DISPLAY
+====================
+• Unified chat bubble view for 1:1 conversations
+• Group conversation threads with participant list
+• Render inbound/outbound message bubbles
+• Show sender name for group message participants
+• Selectable text in message bubbles
+• Clickable links (URL linkification via regex)
+• Search highlighting across conversation text
+• Timestamp display for each message
+• Sender labels for inbound group messages
+
+---
+
+SYNC & AUTOMATION
+=================
+• Manual "Sync Now" action to pull latest messages/contacts/calls
+• Hourly auto-sync while app is running
+• Configurable sync interval
+• Live ADB queries (no polling files)
+• Background worker thread (non-blocking UI)
+
+---
+
+CONTACT DISCOVERY & QUICK ADD
+==============================
+• "+ Contact" button to add new contact inline
+• "Edit Contact" button in conversation view
+• Pre-fill phone number from unknown incoming message
+• One-click vCard push to phone after adding contact
+
+---
+
+DATABASE & PERSISTENCE
+=======================
+• SQLite local database (default: %APPDATA%\SocialTextManager\local.db)
+• Configurable database location (restart required)
+• Tables:
+  - contacts (phone_number, alternate_phones, emails, address, notes, frequency, enabled)
+  - messages (phone, direction, body, timestamp, source)
+  - group_threads (thread_id, participants, label)
+  - group_messages (thread_id, direction, body, timestamp, from_address)
+  - calls (phone, direction, timestamp, duration)
+• Row-dict access for easy querying
+• Connection pooling via context manager
+
+---
+
+CONFIGURATION & SETTINGS
+========================
+• ADB executable path (configurable, defaults to PATH)
+• Auto-sync interval (default: 60 minutes)
+• Default message template
+• Database location override
+• Persistent QSettings-based storage
+
+---
+
+IMPORT/EXPORT WORKFLOWS
+=======================
+• Google Contacts CSV/vCard import with preview
+• XML SMS/MMS backup import (SMS Backup & Restore format)
+• vCard export (single file or push to phone)
+• Phone contact sync from Android Contacts ContentProvider
+• Device backup export tool
+
+---
+
+MAINTENANCE & UTILITIES
+=======================
+• Screen Copy tool
+• D-Pad Controller for device interaction
+• Device Backup Export
+• Cleanup tool for previously duplicated group messages
+• Phone number concatenation repair (one-time fix for malformed imports)
+• Health check: adb devices ready status
+
+---
+
+TECHNICAL FEATURES
+==================
+• Modular architecture (core, db, phone, services, ui, workers)
+• Layered dependency structure (UI/workers import lower; lower layers don't import Qt)
+• Domain models separate from persistence (Contact dataclass + ORM)
+• Pure logic functions (phone normalization, parsing) testable without DB
+• Background sync via QThread worker (non-blocking UI)
+• Protocol-based sync backend (extensible for future cloud sync)
+
+---
+
+ROADMAP (NOT YET IMPLEMENTED)
+=============================
+• Google Drive or home-server sync
+• Conflict resolution for multi-device sync
+• Alternative SMS send methods for newer Android versions
+• Export/import contacts as JSON
+• Multi-recipient MMS support
+• Message scheduling and auto-send
+• Database encryption (before cloud sync)
+
+---
+
+LIMITATIONS & CAVEATS
+=====================
+• SMS read via non-root ADB may fail on some OEMs/Android versions
+• SMS send via isms service call device/OS dependent (can fail silently)
+• MMS send launches app on device; user must confirm final send
+• Carrier may reject large files (recommend <3 MB photos)
+• Contact list UI (left sidebar) uses QPainter; text not selectable
+• Group message sender resolution requires contact lookup per unique sender
+• XML import fallback (missing <addrs> block) may lose sender-to-recipient mapping
+
+---
+
+SYSTEM REQUIREMENTS
+===================
+• Windows 10/11
+• Python 3.11+
+• Android Platform Tools (adb.exe on PATH or configured)
+• Android phone with USB debugging enabled
+• USB connection between Windows PC and phone

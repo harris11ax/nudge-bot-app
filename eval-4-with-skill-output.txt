@@ -1,0 +1,139 @@
+TEST CASE 4: Settings Panel Task Classification
+==================================================
+
+INPUT TASK
+----------
+Add this task: Design and implement the Settings panel for nudge-app (task tools favorites,
+hidden list, style/color theme selector, pause menu custom times, calendar auto-pause checkbox,
+GCal refresh caps). This touches UI architecture, state persistence, component hierarchy.
+Involves design decisions on grouping, terminology, validation. Estimate: 6-8 hours. This is
+standalone UI work.
+
+SKILL APPLICATION: nextsteps-classifier
+========================================
+
+Step 1: Task Info Extraction
+- Description: Settings panel (multi-control: favorites, hidden list, theme, pause times, GCal auto-pause, refresh caps)
+- Time estimate: 6–8 hours
+- Blocking: None (independent, no downstream dependencies)
+
+Step 2: Model Tier Classification
+-----------------------------------
+
+**TIER DECISION: Opus**
+
+**Edge Case Reasoning (why Opus, not Sonnet):**
+
+Sonnet criteria check:
+  ✗ Estimate <4h? No → 6–8h explicitly stated
+  ✗ Straightforward feature? No → involves UI architecture and state design
+  ✗ Incremental to existing pattern? Partial → Settings is new subsystem, not additive to task/prompt flow
+
+Opus criteria check:
+  ✓ Estimate >4h? Yes → 6–8h
+  ✓ Architectural concern? Yes → "touches UI architecture, state persistence, component hierarchy"
+  ✓ Design unknowns? Yes → "design decisions on grouping, terminology, validation"
+  ✓ Cross-cutting? Yes → theme application, state persistence layer, pause-time validation model
+
+**Material design questions (require up-front reasoning):**
+  1. Component grouping: How to organize 6 controls (favorites, hidden, theme, pause times, GCal auto-pause, caps)?
+     Single panel vs. tabs vs. collapsible sections?
+  2. State persistence: Where/how to store theme (localStorage, Tauri config, CSS vars)? Sync strategy?
+  3. Pause times validation: Range picker UI for custom times? Constraint: must not overlap running pause?
+  4. Theme application: Global CSS vars + component props, or Svelte store + reactive updates?
+  5. GCal refresh caps: Rate limiter on API side or UI throttle? Storage of user-set limit?
+
+This is NOT a 1-hour "add a button" task. The design phase (deciding on state shape, validation,
+component hierarchy) is load-bearing and non-trivial. Opus level.
+
+Step 3: UNSKIPPABLE Detection
+------------------------------
+
+Dependency check (read NEXTSTEPS.md):
+  ✓ No existing task depends on Settings panel
+  ✓ Task 10 (GCal read) is orthogonal
+  ✓ Task 9d-ii/9f (task-id threading) are orthogonal
+  ✓ No existing task will break if this is skipped
+
+**RESULT: No UNSKIPPABLE flag**
+
+Rationale: This is independent UI work. Can proceed in parallel with GCal, task-id threading,
+etc. Skipping does not invalidate downstream tasks.
+
+Step 4: Time Bucket
+-------------------
+6–8 hours → Bucket: **~1d** (or ~6-8h; could also note "Opus thinking phase: 2–3h design;
+implementation: 3–5h")
+
+Step 5: Formatted Entry
+-----------------------
+
+- [ ] **5 — Settings panel (theme, pause times, GCal caps, task favorites)** | **Opus** | ~1d
+  Design and implement multi-control Settings panel: task-tools favorites, hidden list,
+  style/color theme selector, pause menu custom times, calendar auto-pause checkbox, GCal
+  refresh caps. Architectural concern: state persistence layer (theme + pause times + caps
+  storage), component hierarchy (grouping/tabs/sections), validation model for pause-time
+  ranges. Design unknowns: component organization, theme application strategy (CSS vars vs.
+  store), pause-time overlap constraints.
+
+Step 6: Renumbering with New Task (Full Preview)
+--------------------------------------------------
+
+## Next steps
+
+- [ ] **1 — 9d-ii (app half) — task-id threading & app receiver** | **Sonnet** | UNSKIPPABLE | ~1.5h
+  Win.task_id → ScheduleCtx.window_task_id → State::Prompting.task_id → svc copydata launch call.
+  App-side: parse `--task <id>` CLI, register WM_COPYDATA handler, route to task page.
+  Sidebar **Start** button wiring (LoopSignal::OpenApp receiver in app once ipc channel stable).
+  (Optional non-scheduled follow-up: manual click quick-add button in WebView2 to verify app IPC end-to-end.)
+
+- [ ] **2 — 9f — Honor Task.mode_override in schedule→svc path** | **Sonnet** | UNSKIPPABLE | ~1h
+  Currently svc classifies at edge; respect mode_override when present (rules-side fallback for both).
+  Once/deadline-only task firing (deferred — needs per-task done-flag svc can set or app clears).
+
+- [ ] **3 — 10 — UI-P2–P4 Calendar + connectors** | **Opus** | Planning run required. | ~1d
+  Multi-Google Calendar read + write to primary. Suggested-triggers inbox. Gmail/GCal connectors.
+  Defer to Opus planning session once 9d-ii + 9f done.
+
+- [ ] **4 — 11–12 — UI addendum (task tools, check-in flow, dynamic deadline windows, style settings)** | **Opus** | Planning run required. | ~1d+
+  Details in NEXTSTEPS.md §11–§12 (task-tool selector, AW-usage sort, ON/OFF check-in popups,
+  tray Pause menu, calendar-event auto-pause, GCal refresh caps). Budget: 5-min AW sampling edge
+  permitted ONLY while STARTED+unpaused. Dynamic window scale by remaining work. Off-task list
+  ≤12 rows + not-started red-outline at <24h. Single `task_window.rs` core module, zero UI logic.
+  Gentle "It's okay" copy on No.
+
+- [ ] **5 — Settings panel (theme, pause times, GCal caps, task favorites)** | **Opus** | ~1d
+  Design and implement multi-control Settings panel: task-tools favorites, hidden list,
+  style/color theme selector, pause menu custom times, calendar auto-pause checkbox, GCal
+  refresh caps. Architectural concern: state persistence layer (theme + pause times + caps
+  storage), component hierarchy (grouping/tabs/sections), validation model for pause-time
+  ranges. Design unknowns: component organization, theme application strategy (CSS vars vs.
+  store), pause-time overlap constraints.
+
+
+CLASSIFICATION SUMMARY
+======================
+
+Entry formatted:
+  - [ ] **5 — Settings panel (theme, pause times, GCal caps, task favorites)** | **Opus** | ~1d
+
+Model tier:  Opus (6–8h, architectural + design unknowns: state persistence, component hierarchy,
+            validation model for pause times)
+
+UNSKIPPABLE: No (independent UI work, no blocking dependencies)
+
+Position:    Appended after task 11–12 (no reordering needed)
+
+Renumbering: All prior tasks remain numbered 1–4; new task is 5
+
+Preview:     Full "## Next steps" section shown above with all 5 tasks renumbered (1–5)
+
+REASONING: Settings panel is Opus-tier because the 6–8h estimate, combined with explicit
+architectural touch (state persistence, component hierarchy) and design unknowns (how to
+validate pause times, where to store theme state, component grouping strategy), requires
+upfront design reasoning. It's not a straightforward add-on; it's a new subsystem with
+cross-cutting concerns (theme application, state shape, validation logic).
+
+No UNSKIPPABLE flag because no existing task depends on Settings. GCal connectors, task-id
+threading, and UI check-in flow can all proceed independently. Skipping Settings does not
+block downstream work.

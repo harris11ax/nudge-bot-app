@@ -1,0 +1,214 @@
+//! SQLite session log. Append-only writes at state edges only; WAL off,
+//! small page cache. Tables: sessions (state edges) and outcomes (user
+//! answers: started/snoozed/skipped/checked_in).
+
+use nudge_core::tasks::{Recur, Task, TriggerSource};
+use nudge_core::{Mode, UnixTime};
+use std::path::PathBuf;
+
+pub struct Db {
+    conn: rusqlite::Connection,
+}
+
+impl Db {
+    pub fn open(path: PathBuf) -> Self {
+        std::fs::create_dir_all(path.parent().unwrap()).expect("config dir");
+        let conn = rusqlite::Connection::open(&path).expect("open sessions.db");
+        conn.execute_batch(
+            "PRAGMA journal_mode=DELETE; PRAGMA cache_size=-64;
+             CREATE TABLE IF NOT EXISTS sessions (
+                 at    INTEGER NOT NULL,
+                 state TEXT    NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS outcomes (
+                 at      INTEGER NOT NULL,
+                 outcome TEXT    NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS tasks (
+                 id             INTEGER PRIMARY KEY,
+                 title          TEXT    NOT NULL,
+                 description    TEXT    NOT NULL DEFAULT '',
+                 deadline       INTEGER,
+                 task_type      TEXT    NOT NULL DEFAULT '',
+                 minutes        INTEGER,
+                 recur          TEXT    NOT NULL DEFAULT 'once',
+                 mode_override  TEXT,
+                 trigger_source TEXT    NOT NULL DEFAULT 'manual',
+                 gcal_event_id  TEXT
+             );",
+        )
+        .expect("schema");
+        // UI-P0 (8c): widen `sessions` with the notification mode chosen at a
+        // prompt edge, the edge kind the svc armed next, and a click-through flag
+        // reserved for P1's notification-click wiring. Added incrementally so an
+        // existing sessions.db upgrades in place; SQLite has no ADD COLUMN IF NOT
+        // EXISTS, so a duplicate-column error on a second boot is expected and
+        // ignored.
+        for col in [
+            "ALTER TABLE sessions ADD COLUMN mode         TEXT",
+            "ALTER TABLE sessions ADD COLUMN edge_kind    TEXT",
+            "ALTER TABLE sessions ADD COLUMN clickthrough INTEGER",
+        ] {
+            let _ = conn.execute(col, []);
+        }
+        Self { conn }
+    }
+
+    /// Append a state-transition row. `mode` is the notification mode the prompt
+    /// opened in (`None` on non-prompt edges); `armed_kind` is the [`EdgeKind`]
+    /// label of the timer armed alongside this edge (`None` if none was armed).
+    pub fn log_edge(
+        &mut self,
+        entered: &str,
+        at: UnixTime,
+        mode: Option<&str>,
+        armed_kind: Option<&str>,
+    ) {
+        self.conn
+            .execute(
+                "INSERT INTO sessions (at, state, mode, edge_kind) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![at, entered, mode, armed_kind],
+            )
+            .expect("log edge");
+    }
+
+    /// Append a user-outcome row (started/snoozed/skipped/checked_in). `outcome`
+    /// is the stable [`nudge_core::state::Outcome::label`] string.
+    pub fn log_outcome(&mut self, outcome: &str, at: UnixTime) {
+        self.conn
+            .execute(
+                "INSERT INTO outcomes (at, outcome) VALUES (?1, ?2)",
+                rusqlite::params![at, outcome],
+            )
+            .expect("log outcome");
+    }
+
+    /// Mark a notification click-through on the most recent session row (P1).
+    /// The `clickthrough` column was reserved at 8c; the overlay body-click sets
+    /// it here. Targets the latest `sessions` row — the prompt the user just
+    /// clicked — by rowid. Best-effort: no prompt row yet is a silent no-op.
+    pub fn log_clickthrough(&mut self, _at: UnixTime) {
+        let _ = self.conn.execute(
+            "UPDATE sessions SET clickthrough = 1
+             WHERE rowid = (SELECT MAX(rowid) FROM sessions)",
+            [],
+        );
+    }
+
+    /// Read every row of the `tasks` table (UI-P1). The svc is a **read-only**
+    /// consumer here: nudge-app is the sole writer and signals changes via the
+    /// existing `Local\nudge-bot-reload` event, at which point the svc re-reads.
+    /// A malformed `recur` spec falls back to [`Recur::Once`] rather than dropping
+    /// the row, mirroring the tolerant `trigger_source` read-back. Ordered by id
+    /// so callers see a stable sequence. The svc loop feeds these rows to
+    /// [`nudge_core::schedule::context_with_tasks`] each wake (9e window-gen).
+    pub fn tasks(&self) -> Vec<Task> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, title, description, deadline, task_type, minutes,
+                        recur, mode_override, trigger_source, gcal_event_id
+                 FROM tasks ORDER BY id",
+            )
+            .expect("prepare tasks");
+        let rows = stmt
+            .query_map([], |r| {
+                let recur_spec: String = r.get(6)?;
+                let mode_s: Option<String> = r.get(7)?;
+                let source_s: String = r.get(8)?;
+                Ok(Task {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    desc: r.get(2)?,
+                    deadline: r.get(3)?,
+                    task_type: r.get(4)?,
+                    minutes: r.get::<_, Option<i64>>(5)?.map(|m| m as u32),
+                    recur: Recur::parse(&recur_spec).unwrap_or(Recur::Once),
+                    mode_override: mode_s.as_deref().and_then(parse_mode),
+                    trigger_source: TriggerSource::from_label(&source_s),
+                    gcal_event_id: r.get(9)?,
+                })
+            })
+            .expect("query tasks");
+        rows.map(|r| r.expect("task row")).collect()
+    }
+}
+
+/// Map a persisted `mode_override` label to a [`Mode`]; unknown/NULL → `None`
+/// (classify at the edge as usual).
+fn parse_mode(s: &str) -> Option<Mode> {
+    match s {
+        "off_task" => Some(Mode::OffTask),
+        "on_task" => Some(Mode::OnTask),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Unique per-process temp db so parallel test runs don't collide; cleaned up
+    // at the end of each test.
+    fn temp_db() -> PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!("nudge-tasks-test-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn tasks_migrate_and_round_trip() {
+        let path = temp_db();
+        let db = Db::open(path.clone());
+        // App is the writer in production; the test stands in for it via raw SQL
+        // against the same schema the migration created.
+        db.conn
+            .execute(
+                "INSERT INTO tasks
+                    (title, description, deadline, task_type, minutes,
+                     recur, mode_override, trigger_source, gcal_event_id)
+                 VALUES ('gym', 'leg day', 1234, 'health', 1050,
+                         'mon,wed,fri', 'on_task', 'gcal', 'evt_9')",
+                [],
+            )
+            .unwrap();
+        // A second row exercising the NULL / default paths.
+        db.conn
+            .execute(
+                "INSERT INTO tasks (title, recur) VALUES ('call mum', 'once')",
+                [],
+            )
+            .unwrap();
+
+        let tasks = db.tasks();
+        assert_eq!(tasks.len(), 2);
+
+        let gym = &tasks[0];
+        assert_eq!(gym.title, "gym");
+        assert_eq!(gym.desc, "leg day");
+        assert_eq!(gym.deadline, Some(1234));
+        assert_eq!(gym.task_type, "health");
+        assert_eq!(gym.minutes, Some(1050));
+        assert_eq!(gym.recur, Recur::Weekly(vec![0, 2, 4]));
+        assert_eq!(gym.mode_override, Some(Mode::OnTask));
+        assert_eq!(gym.trigger_source, TriggerSource::Gcal);
+        assert_eq!(gym.gcal_event_id.as_deref(), Some("evt_9"));
+
+        let mum = &tasks[1];
+        assert_eq!(mum.desc, ""); // column DEFAULT ''
+        assert_eq!(mum.deadline, None);
+        assert_eq!(mum.minutes, None);
+        assert_eq!(mum.mode_override, None); // NULL → classify at edge
+        assert_eq!(mum.trigger_source, TriggerSource::Manual); // column DEFAULT
+        assert_eq!(mum.gcal_event_id, None);
+
+        // Re-opening must be idempotent (CREATE TABLE IF NOT EXISTS) and preserve rows.
+        drop(db);
+        let db2 = Db::open(path.clone());
+        assert_eq!(db2.tasks().len(), 2);
+
+        drop(db2);
+        let _ = std::fs::remove_file(&path);
+    }
+}

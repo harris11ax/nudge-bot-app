@@ -1,0 +1,48 @@
+[package]
+name = "nudge-app"
+version = "0.1.0"
+edition = "2021"
+description = "nudge-bot planner / triggers / calendar GUI (on-demand, not resident)"
+
+# Standalone package: intentionally NOT a workspace member (see root Cargo.toml
+# `exclude`). Keeps Tauri's dep tree and lockfile off the resident nudge-svc build.
+
+[lib]
+name = "nudge_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Shared, OS-free data model + parsers (Task/Recur/Mode/TriggerSource, quick-add).
+nudge-core = { path = "../../nudge-core" }
+# Same SQLite the svc reads; app is the sole writer of the `tasks` table.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Google OAuth token exchange/refresh + (10b+) Calendar/Gmail REST calls.
+# Blocking, no async — same idiom as nudge-draft's Anthropic client.
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+
+# Win32 named-event signal so the resident svc live-reloads after a write, matching
+# nudge-ctl's `Local\nudge-bot-reload` path (no new IPC surface). Also: WM_COPYDATA
+# receiver for svc click-through focus (9d-ii) — window subclassing + the
+# COPYDATASTRUCT wire type. Cryptography: DPAPI (google token cache) + CNG/bcrypt
+# (PKCE verifier randomness + S256 challenge hash, google/oauth.rs).
+[target.'cfg(windows)'.dependencies]
+# Pinned to match the `windows` version tauri/tao/wry pull in transitively —
+# two versions in the dependency tree make their types (HWND etc.) incompatible.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_DataExchange",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Security_Cryptography",
+] }
+
+[features]
+# Default Tauri custom-protocol for release builds (set by `tauri build`).
+custom-protocol = ["tauri/custom-protocol"]

@@ -1,0 +1,45 @@
+# nudge-bot rules — task-initiation nudges. Edits apply on reload.
+
+[anchor]
+# Persistent intention anchor shown during any active nudge window.
+default_text = "What are you here to do?"
+position = "top"               # top | bottom
+height_px = 28
+
+# Scheduled nudge windows: anchor is visible, nudge fires at entry.
+[[nudge]]
+name = "morning-intent"
+days = ["mon", "tue", "wed", "thu", "fri"]
+start = "08:30"
+end = "12:00"
+text = "Deep work block — one task."
+
+[[nudge]]
+name = "evening-shutdown"
+days = ["mon", "tue", "wed", "thu", "fri"]
+start = "21:30"
+end = "22:00"
+text = "Wrap up. Plan tomorrow."
+
+[hotkey]
+# Manual anchor toggle.
+modifiers = ["ctrl", "alt"]
+key = "N"
+
+[escalation]
+# Prompt visibility ladder for an ignored nudge (seconds after it first shows).
+l1_after_secs = 300            # rise to L1 (brighter) after 5 min
+l2_after_secs = 600            # rise to L2 (loud + sound) after 10 min
+l2_repeat_secs = 600           # re-alert cadence at L2; 0 disables re-alerts
+snooze_secs = 600              # Snooze hides the prompt for this long
+# Post-start check-in: after you press Start, ask "still on it?" this many
+# seconds later. 0 (or omitting the field) disables check-ins entirely.
+checkin_after_secs = 0
+
+[classify]
+# On/off-task mode pick (UI-PLAN §1). When a nudge window opens, nudge-svc asks
+# ActivityWatch for the current foreground app; if it matches one of these
+# executables the user is plainly already working → ON-TASK (soft, peripheral,
+# no escalation). Anything else — or AW being down — → OFF-TASK (strong,
+# escalating). Case-insensitive; empty list means every prompt is OFF-TASK.
+productive_apps = []           # e.g. ["code.exe", "idea64.exe", "obsidian.exe"]

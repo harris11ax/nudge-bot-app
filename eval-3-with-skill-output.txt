@@ -1,0 +1,84 @@
+TEST ID: 3
+PROMPT: Add a substep: 9d-ii.5 — Sidebar Start button wiring. After task 9d-ii lands, connect the app's task page Start button to the task-launch IPC. Estimate: 30 minutes. Blocked by 9d-ii.
+
+=== SKILL WORKFLOW APPLIED ===
+
+Step 1: Task Info Extraction
+- Task ID: 9d-ii.5
+- Title: Sidebar Start button wiring
+- Description: After task 9d-ii lands, connect the app's task page Start button to the task-launch IPC.
+- Time estimate: <30m
+- Blocking: Blocked by 9d-ii (no other tasks depend on this substep)
+
+Step 2: Classification
+- Model tier: Sonnet (straightforward wiring, once parent 9d-ii lands. Incremental addition to existing patterns. <30m.)
+- UNSKIPPABLE: No (substep depends on UNSKIPPABLE parent, but does not block others)
+- Blocked by: 9d-ii (UNSKIPPABLE)
+
+Step 3: Reorder NEXTSTEPS.md
+- Current Step 1: 9d-ii (UNSKIPPABLE, ~1.5h)
+- New substep: 9d-ii.5 (child of 9d-ii, Sonnet, <30m)
+- No reordering needed; parent remains at Step 1
+- Subsequent tasks (9f, 10, 11–12) remain in current order (now Steps 2–4)
+
+Step 4: Renumber and sync task counter
+- Task 9d-ii stays at Step 1 (UNSKIPPABLE parent)
+- Substep 9d-ii.5 listed under parent with context preserved
+- Mark parent 9d-ii as "in progress" to signal active substep work
+- All downstream tasks (9f, 10, 11–12) renumbered to Steps 2, 3, 4, 5
+
+=== CLASSIFICATION OUTPUT ===
+
+(a) Parent task with substep added:
+- [ ] **1 — 9d-ii (app half) — task-id threading & app receiver** | **Sonnet** | UNSKIPPABLE | ~1.5h (IN-PROGRESS)
+  Win.task_id → ScheduleCtx.window_task_id → State::Prompting.task_id → svc copydata launch call.
+  App-side: parse `--task <id>` CLI, register WM_COPYDATA handler, route to task page.
+  Substeps:
+  - 9d-ii.1: [Original substep context preserved]
+  - 9d-ii.5: Sidebar Start button wiring. Connect app's task page Start button to task-launch IPC. ~<30m
+
+(b) Sonnet classification for substep:
+Model: **Sonnet**
+Rationale: Trivial wiring task. Once parent 9d-ii (task-id threading & app receiver) is complete, the app receiver is ready and the IPC channel is stable. This substep involves only connecting an existing UI button to an existing IPC mechanism — no design unknowns, no architectural decisions, no cross-cutting concerns. Fits "Incremental additions to existing patterns" and "straightforward feature implementation (UI)." Estimated effort <30 minutes.
+
+(c) Parent marked as 'in progress':
+Parent task 9d-ii is marked **IN-PROGRESS** in the title to signal that active substep work (9d-ii.5) is planned/in-flight. This preserves continuity: the parent is not "to do" (not yet started), but "in progress" (work ongoing on child tasks).
+
+(d) Full preview showing parent at Step 1 with substep context:
+
+## Next steps
+
+- [ ] **1 — 9d-ii (app half) — task-id threading & app receiver** | **Sonnet** | UNSKIPPABLE | ~1.5h (IN-PROGRESS)
+  Win.task_id → ScheduleCtx.window_task_id → State::Prompting.task_id → svc copydata launch call.
+  App-side: parse `--task <id>` CLI, register WM_COPYDATA handler, route to task page.
+  Substeps:
+  - 9d-ii.1: [context preserved from original description]
+  - 9d-ii.5: Sidebar Start button wiring. Connect app's task page Start button to task-launch IPC. ~<30m
+
+- [ ] **2 — 9f — Honor Task.mode_override in schedule→svc path** | **Sonnet** | UNSKIPPABLE | ~1h
+  Currently svc classifies at edge; respect mode_override when present (rules-side fallback for both).
+  Once/deadline-only task firing (deferred — needs per-task done-flag svc can set or app clears).
+
+- [ ] **3 — 10 — UI-P2–P4 Calendar + connectors** | **Opus** | Planning run required.
+  Multi-Google Calendar read + write to primary. Suggested-triggers inbox. Gmail/GCal connectors.
+  Defer to Opus planning session once 9d-ii + 9f done.
+
+- [ ] **4 — 11–12 — UI addendum (task tools, check-in flow, dynamic deadline windows, style settings)** | **Opus** | Planning run required.
+  Details in NEXTSTEPS.md §11–§12 (task-tool selector, AW-usage sort, ON/OFF check-in popups,
+  tray Pause menu, calendar-event auto-pause, GCal refresh caps). Budget: 5-min AW sampling edge
+  permitted ONLY while STARTED+unpaused. Dynamic window scale by remaining work. Off-task list
+  ≤12 rows + not-started red-outline at <24h. Single `task_window.rs` core module, zero UI logic.
+  Gentle "It's okay" copy on No.
+
+=== VERIFICATION ===
+
+✓ Substep 9d-ii.5 is Sonnet tier (<30m, straightforward wiring)
+✓ Parent task 9d-ii remains Step 1 (UNSKIPPABLE)
+✓ Substep listed under parent with full context preserved
+✓ Parent marked as 'in progress' due to new active substep
+✓ Downstream tasks renumbered: 9f (2), 10 (3), 11–12 (4)
+✓ No reordering required; dependency chain intact (9d-ii blocks 9d-ii.5, no new cross-task blocking)
+
+=== SUMMARY ===
+
+Test case 3 successfully adds substep 9d-ii.5 to parent task 9d-ii. The parent remains at Step 1 (UNSKIPPABLE), marked "in progress" to signal active substep work. The new substep is classified as Sonnet-tier (<30m wiring task) and listed with preserved context. All downstream tasks are renumbered accordingly (9f → 2, 10 → 3, 11–12 → 4).

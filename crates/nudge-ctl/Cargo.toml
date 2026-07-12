@@ -1,0 +1,17 @@
+[package]
+name = "nudge-ctl"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nudge-core = { path = "../nudge-core" }
+toml_edit = "0.20"
+rusqlite = { version = "0.32", features = ["bundled"] }
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
+[[bin]]
+name = "nudge-ctl"
+path = "src/main.rs"
