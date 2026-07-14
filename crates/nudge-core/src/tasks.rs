@@ -206,6 +206,13 @@ pub struct Task {
     pub trigger_source: TriggerSource,
     /// Google Calendar event id this task mirrors, if imported; `None` otherwise.
     pub gcal_event_id: Option<String>,
+    /// Estimated work in minutes (§6.3); `None` = no estimate (window falls back
+    /// to the static 48 h horizon and progress-bands read as not-started).
+    pub estimate_minutes: Option<u32>,
+    /// Minutes worked so far (§6.3), the `X` in the progress fill. Cache of the
+    /// last edge value: the svc alone writes it (the sanctioned `logged_minutes`
+    /// exception, PLAN §3), recomputed lazily — never ticked. Defaults 0.
+    pub logged_minutes: u32,
 }
 
 #[cfg(test)]

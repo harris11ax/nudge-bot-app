@@ -34,10 +34,33 @@ impl Db {
                  recur          TEXT    NOT NULL DEFAULT 'once',
                  mode_override  TEXT,
                  trigger_source TEXT    NOT NULL DEFAULT 'manual',
-                 gcal_event_id  TEXT
+                 gcal_event_id  TEXT,
+                 estimate_minutes INTEGER,
+                 logged_minutes   INTEGER NOT NULL DEFAULT 0
+             );
+             -- Task-scoped tool lists (§6.4/§6.8). `kind`: 'tool' (an app that
+             -- counts as working on this task) or 'ignore' (task-scoped transient
+             -- mute). App is the writer; the svc reads it at the sample compare
+             -- (Phase 3), so it lives in both schemas byte-identical like `tasks`.
+             CREATE TABLE IF NOT EXISTS task_tools (
+                 task_id  INTEGER NOT NULL,
+                 app_name TEXT    NOT NULL,
+                 kind     TEXT    NOT NULL DEFAULT 'tool',
+                 PRIMARY KEY (task_id, app_name, kind)
              );",
         )
         .expect("schema");
+        // Additive migration for a pre-Phase-2 `tasks` table (§3): SQLite has no
+        // ADD COLUMN IF NOT EXISTS, so a duplicate-column error on an already-
+        // migrated DB is expected and ignored — same idiom as the `sessions`
+        // widening above. New rows read the documented defaults (estimate NULL →
+        // "no estimate", logged 0).
+        for col in [
+            "ALTER TABLE tasks ADD COLUMN estimate_minutes INTEGER",
+            "ALTER TABLE tasks ADD COLUMN logged_minutes INTEGER NOT NULL DEFAULT 0",
+        ] {
+            let _ = conn.execute(col, []);
+        }
         // UI-P0 (8c): widen `sessions` with the notification mode chosen at a
         // prompt edge, the edge kind the svc armed next, and a click-through flag
         // reserved for P1's notification-click wiring. Added incrementally so an
@@ -107,7 +130,8 @@ impl Db {
             .conn
             .prepare(
                 "SELECT id, title, description, deadline, task_type, minutes,
-                        recur, mode_override, trigger_source, gcal_event_id
+                        recur, mode_override, trigger_source, gcal_event_id,
+                        estimate_minutes, logged_minutes
                  FROM tasks ORDER BY id",
             )
             .expect("prepare tasks");
@@ -127,10 +151,26 @@ impl Db {
                     mode_override: mode_s.as_deref().and_then(parse_mode),
                     trigger_source: TriggerSource::from_label(&source_s),
                     gcal_event_id: r.get(9)?,
+                    estimate_minutes: r.get::<_, Option<i64>>(10)?.map(|m| m as u32),
+                    logged_minutes: r.get::<_, i64>(11)? as u32,
                 })
             })
             .expect("query tasks");
         rows.map(|r| r.expect("task row")).collect()
+    }
+
+    /// The **one** sanctioned svc write into `tasks` (§3, budget callout): update
+    /// a single row's `logged_minutes` cache by rowid at a sample/check-in/ack
+    /// edge. Keyed by rowid, one UPDATE, no schema churn. Every other `tasks`
+    /// column is app-owned and read-only here. Returns rows affected (0 = no such
+    /// task).
+    pub fn set_logged_minutes(&mut self, task_id: i64, minutes: u32) -> usize {
+        self.conn
+            .execute(
+                "UPDATE tasks SET logged_minutes = ?2 WHERE id = ?1",
+                rusqlite::params![task_id, minutes as i64],
+            )
+            .expect("set logged_minutes")
     }
 }
 
@@ -150,16 +190,16 @@ mod tests {
 
     // Unique per-process temp db so parallel test runs don't collide; cleaned up
     // at the end of each test.
-    fn temp_db() -> PathBuf {
+    fn temp_db(tag: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("nudge-tasks-test-{}.db", std::process::id()));
+        p.push(format!("nudge-tasks-test-{}-{tag}.db", std::process::id()));
         let _ = std::fs::remove_file(&p);
         p
     }
 
     #[test]
     fn tasks_migrate_and_round_trip() {
-        let path = temp_db();
+        let path = temp_db("roundtrip");
         let db = Db::open(path.clone());
         // App is the writer in production; the test stands in for it via raw SQL
         // against the same schema the migration created.
@@ -194,6 +234,8 @@ mod tests {
         assert_eq!(gym.mode_override, Some(Mode::OnTask));
         assert_eq!(gym.trigger_source, TriggerSource::Gcal);
         assert_eq!(gym.gcal_event_id.as_deref(), Some("evt_9"));
+        assert_eq!(gym.estimate_minutes, None); // unset → no estimate
+        assert_eq!(gym.logged_minutes, 0); // column DEFAULT 0
 
         let mum = &tasks[1];
         assert_eq!(mum.desc, ""); // column DEFAULT ''
@@ -202,6 +244,7 @@ mod tests {
         assert_eq!(mum.mode_override, None); // NULL → classify at edge
         assert_eq!(mum.trigger_source, TriggerSource::Manual); // column DEFAULT
         assert_eq!(mum.gcal_event_id, None);
+        assert_eq!(mum.logged_minutes, 0);
 
         // Re-opening must be idempotent (CREATE TABLE IF NOT EXISTS) and preserve rows.
         drop(db);
@@ -209,6 +252,70 @@ mod tests {
         assert_eq!(db2.tasks().len(), 2);
 
         drop(db2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // The one sanctioned svc→tasks write (§3): a single UPDATE-by-rowid of
+    // `logged_minutes`, leaving every other column untouched.
+    #[test]
+    fn set_logged_minutes_by_rowid() {
+        let path = temp_db("setlogged");
+        let mut db = Db::open(path.clone());
+        db.conn
+            .execute(
+                "INSERT INTO tasks (title, estimate_minutes) VALUES ('write', 120)",
+                [],
+            )
+            .unwrap();
+        let id = db.conn.last_insert_rowid();
+
+        assert_eq!(db.set_logged_minutes(id, 45), 1);
+        let t = &db.tasks()[0];
+        assert_eq!(t.logged_minutes, 45);
+        assert_eq!(t.estimate_minutes, Some(120)); // untouched
+        assert_eq!(t.title, "write"); // untouched
+
+        // Unknown id affects nothing.
+        assert_eq!(db.set_logged_minutes(9999, 10), 0);
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // A pre-Phase-2 `tasks` table (no estimate/logged columns) migrates in place
+    // on open: the ALTER adds the columns and old rows read documented defaults.
+    #[test]
+    fn migrates_pre_phase2_tasks_table() {
+        let path = temp_db("migrate");
+        // Stand up the OLD schema (Phase-1 shape) directly and seed a row.
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tasks (
+                     id             INTEGER PRIMARY KEY,
+                     title          TEXT    NOT NULL,
+                     description    TEXT    NOT NULL DEFAULT '',
+                     deadline       INTEGER,
+                     task_type      TEXT    NOT NULL DEFAULT '',
+                     minutes        INTEGER,
+                     recur          TEXT    NOT NULL DEFAULT 'once',
+                     mode_override  TEXT,
+                     trigger_source TEXT    NOT NULL DEFAULT 'manual',
+                     gcal_event_id  TEXT
+                 );
+                 INSERT INTO tasks (title) VALUES ('legacy');",
+            )
+            .unwrap();
+        }
+        // Opening runs the additive migration; the legacy row survives with defaults.
+        let db = Db::open(path.clone());
+        let tasks = db.tasks();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "legacy");
+        assert_eq!(tasks[0].estimate_minutes, None);
+        assert_eq!(tasks[0].logged_minutes, 0);
+
+        drop(db);
         let _ = std::fs::remove_file(&path);
     }
 }

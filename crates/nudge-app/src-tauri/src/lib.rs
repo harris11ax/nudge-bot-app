@@ -34,6 +34,10 @@ pub struct TaskDto {
     pub mode_override: Option<String>,
     pub trigger_source: String,
     pub gcal_event_id: Option<String>,
+    /// Estimated minutes (§6.3), or null for no estimate.
+    pub estimate_minutes: Option<u32>,
+    /// Minutes worked so far — svc-owned cache, read-only for the progress bar.
+    pub logged_minutes: u32,
 }
 
 impl From<Task> for TaskDto {
@@ -53,6 +57,8 @@ impl From<Task> for TaskDto {
             },
             trigger_source: t.trigger_source.label().to_string(),
             gcal_event_id: t.gcal_event_id,
+            estimate_minutes: t.estimate_minutes,
+            logged_minutes: t.logged_minutes,
         }
     }
 }
@@ -86,6 +92,8 @@ fn add_quickadd(line: String) -> Result<TaskDto, String> {
         mode_override: None,
         trigger_source: TriggerSource::Manual,
         gcal_event_id: None,
+        estimate_minutes: None,
+        logged_minutes: 0,
     };
     insert_and_reload(task)
 }
@@ -105,6 +113,8 @@ pub struct NewTaskForm {
     #[serde(default = "once_spec")]
     pub recur: String,
     pub mode_override: Option<String>,
+    /// Estimated minutes (§6.3), optional.
+    pub estimate_minutes: Option<u32>,
 }
 
 fn once_spec() -> String {
@@ -134,6 +144,8 @@ fn add_task(form: NewTaskForm) -> Result<TaskDto, String> {
         mode_override,
         trigger_source: TriggerSource::Manual,
         gcal_event_id: None,
+        estimate_minutes: form.estimate_minutes,
+        logged_minutes: 0,
     };
     insert_and_reload(task)
 }

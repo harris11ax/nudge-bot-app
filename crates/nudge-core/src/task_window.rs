@@ -171,6 +171,8 @@ mod tests {
             mode_override: None,
             trigger_source: TriggerSource::Manual,
             gcal_event_id: None,
+            estimate_minutes: None,
+            logged_minutes: 0,
         }
     }
 

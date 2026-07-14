@@ -44,7 +44,12 @@ impl Store {
     /// Open (creating the dir + schema if needed). Idempotent with the svc's own
     /// `Db::open`.
     pub fn open() -> rusqlite::Result<Self> {
-        let path = db_path();
+        Self::open_at(db_path())
+    }
+
+    /// Open (and migrate) the store at an explicit path. Backs [`Self::open`] and
+    /// lets tests target a temp DB instead of the machine-wide `db_path()`.
+    pub fn open_at(path: PathBuf) -> rusqlite::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -63,7 +68,17 @@ impl Store {
                  recur          TEXT    NOT NULL DEFAULT 'once',
                  mode_override  TEXT,
                  trigger_source TEXT    NOT NULL DEFAULT 'manual',
-                 gcal_event_id  TEXT
+                 gcal_event_id  TEXT,
+                 estimate_minutes INTEGER,
+                 logged_minutes   INTEGER NOT NULL DEFAULT 0
+             );
+             -- Shared reader table (§6.4/§6.8): svc reads task-scoped tool lists
+             -- at the sample compare, so this stays byte-identical with persist.rs.
+             CREATE TABLE IF NOT EXISTS task_tools (
+                 task_id  INTEGER NOT NULL,
+                 app_name TEXT    NOT NULL,
+                 kind     TEXT    NOT NULL DEFAULT 'tool',
+                 PRIMARY KEY (task_id, app_name, kind)
              );
              -- App-only tables (GOOGLE-PLAN.md §DB additions): the svc never reads
              -- these, so unlike `tasks` there is no parity copy in persist.rs.
@@ -89,6 +104,20 @@ impl Store {
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
              );
+             -- Global app classification (§6.2): class ∈ favorite|normal|hidden|
+             -- not_tool. App-owned; drives the Tools selector and the ON/OFF
+             -- classification screen. The svc never reads this.
+             CREATE TABLE IF NOT EXISTS app_classes (
+                 app_name TEXT PRIMARY KEY,
+                 class    TEXT NOT NULL DEFAULT 'normal'
+             );
+             -- AW usage cache (§6.2 selector sort), refreshed on the GCal cadence.
+             -- Bounded to known apps; app-owned.
+             CREATE TABLE IF NOT EXISTS app_usage (
+                 app_name    TEXT    PRIMARY KEY,
+                 minutes_90d INTEGER NOT NULL DEFAULT 0,
+                 refreshed_at INTEGER NOT NULL DEFAULT 0
+             );
              -- App-only inbox (10d): candidate tasks surfaced from connectors
              -- (Gmail/GCal, 10e) awaiting a user Accept/Dismiss. Distinct from
              -- `tasks` so a connector's guess never lands as a live trigger
@@ -104,6 +133,14 @@ impl Store {
                  created_unix   INTEGER NOT NULL DEFAULT 0
              );",
         )?;
+        // Additive migration for a pre-Phase-2 `tasks` table (§3), mirroring
+        // persist.rs: duplicate-column errors on an already-migrated DB are ignored.
+        for col in [
+            "ALTER TABLE tasks ADD COLUMN estimate_minutes INTEGER",
+            "ALTER TABLE tasks ADD COLUMN logged_minutes INTEGER NOT NULL DEFAULT 0",
+        ] {
+            let _ = conn.execute(col, []);
+        }
         Ok(Self { conn })
     }
 
@@ -112,7 +149,8 @@ impl Store {
     pub fn list(&self) -> rusqlite::Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, description, deadline, task_type, minutes,
-                    recur, mode_override, trigger_source, gcal_event_id
+                    recur, mode_override, trigger_source, gcal_event_id,
+                    estimate_minutes, logged_minutes
              FROM tasks ORDER BY id",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -130,6 +168,8 @@ impl Store {
                 mode_override: mode_s.as_deref().and_then(parse_mode),
                 trigger_source: TriggerSource::from_label(&source_s),
                 gcal_event_id: r.get(9)?,
+                estimate_minutes: r.get::<_, Option<i64>>(10)?.map(|m| m as u32),
+                logged_minutes: r.get::<_, i64>(11)? as u32,
             })
         })?;
         rows.collect()
@@ -137,11 +177,13 @@ impl Store {
 
     /// Insert a task, returning the assigned rowid. `id` on the input is ignored.
     pub fn insert(&self, t: &Task) -> rusqlite::Result<i64> {
+        // `logged_minutes` is deliberately omitted: it is svc-owned (§3) and
+        // defaults 0 on insert; the app writes only `estimate_minutes`.
         self.conn.execute(
             "INSERT INTO tasks
                 (title, description, deadline, task_type, minutes,
-                 recur, mode_override, trigger_source, gcal_event_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 recur, mode_override, trigger_source, gcal_event_id, estimate_minutes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 t.title,
                 t.desc,
@@ -152,6 +194,7 @@ impl Store {
                 mode_label(t.mode_override),
                 t.trigger_source.label(),
                 t.gcal_event_id,
+                t.estimate_minutes.map(|m| m as i64),
             ],
         )?;
         Ok(self.conn.last_insert_rowid())
@@ -416,6 +459,8 @@ impl Store {
             mode_override: None,
             trigger_source: TriggerSource::from_label(&row.source),
             gcal_event_id: row.gcal_event_id,
+            estimate_minutes: None,
+            logged_minutes: 0,
         };
         let task_id = self.insert(&task)?;
         self.conn.execute(
@@ -464,6 +509,66 @@ impl Store {
         )?;
         Ok(())
     }
+
+    // --- Task tools + app classification (§6.2/§6.4, Phase 2 schema) ---
+
+    /// Replace a task's tool list wholesale (§6.4). Clears the task's rows then
+    /// re-inserts `(app_name, kind)` pairs, deduping via the composite PK. A
+    /// transaction so a partial write can't leave a half-updated list the svc
+    /// might read mid-edit.
+    pub fn set_task_tools(&mut self, task_id: i64, tools: &[(String, String)]) -> rusqlite::Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM task_tools WHERE task_id = ?1", rusqlite::params![task_id])?;
+        for (app_name, kind) in tools {
+            tx.execute(
+                "INSERT OR IGNORE INTO task_tools (task_id, app_name, kind) VALUES (?1, ?2, ?3)",
+                rusqlite::params![task_id, app_name, kind],
+            )?;
+        }
+        tx.commit()
+    }
+
+    /// A task's `(app_name, kind)` tool rows, ordered for a stable UI/compare.
+    pub fn list_task_tools(&self, task_id: i64) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT app_name, kind FROM task_tools WHERE task_id = ?1 ORDER BY app_name, kind",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![task_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
+    /// Set an app's global class (§6.2 favorite|normal|hidden|not_tool), upserting.
+    pub fn set_app_class(&self, app_name: &str, class: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO app_classes (app_name, class) VALUES (?1, ?2)
+             ON CONFLICT(app_name) DO UPDATE SET class = excluded.class",
+            rusqlite::params![app_name, class],
+        )?;
+        Ok(())
+    }
+
+    /// An app's global class, or `None` if unclassified (treated as `normal`).
+    pub fn app_class(&self, app_name: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT class FROM app_classes WHERE app_name = ?1",
+                rusqlite::params![app_name],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
+    /// Upsert an app's 90-day usage minutes + refresh time (§6.2 selector sort).
+    pub fn upsert_app_usage(&self, app_name: &str, minutes_90d: i64, refreshed_at: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO app_usage (app_name, minutes_90d, refreshed_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(app_name) DO UPDATE SET
+                 minutes_90d = excluded.minutes_90d,
+                 refreshed_at = excluded.refreshed_at",
+            rusqlite::params![app_name, minutes_90d, refreshed_at],
+        )?;
+        Ok(())
+    }
 }
 
 /// Row shape for [`Store::list_suggested_triggers`] — a connector-surfaced
@@ -496,6 +601,82 @@ pub struct EventRow {
     pub start_unix: i64,
     pub end_unix: i64,
     pub all_day: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_store(tag: &str) -> (Store, PathBuf) {
+        let mut p = std::env::temp_dir();
+        p.push(format!("nudge-app-db-test-{}-{tag}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        (Store::open_at(p.clone()).unwrap(), p)
+    }
+
+    // A task round-trips its estimate; logged_minutes defaults 0 on the app write
+    // side (svc-owned). Tools round-trip through the child table.
+    #[test]
+    fn task_estimate_and_tools_round_trip() {
+        let (mut store, path) = temp_store("tools");
+        let t = Task {
+            id: None,
+            title: "write".into(),
+            desc: String::new(),
+            deadline: Some(999),
+            task_type: String::new(),
+            minutes: None,
+            recur: Recur::Once,
+            mode_override: None,
+            trigger_source: TriggerSource::Manual,
+            gcal_event_id: None,
+            estimate_minutes: Some(90),
+            logged_minutes: 7, // ignored by insert (svc-owned)
+        };
+        let id = store.insert(&t).unwrap();
+        let got = &store.list().unwrap()[0];
+        assert_eq!(got.estimate_minutes, Some(90));
+        assert_eq!(got.logged_minutes, 0); // insert never writes logged
+
+        store
+            .set_task_tools(id, &[("code.exe".into(), "tool".into()), ("slack.exe".into(), "ignore".into())])
+            .unwrap();
+        assert_eq!(
+            store.list_task_tools(id).unwrap(),
+            vec![("code.exe".into(), "tool".into()), ("slack.exe".into(), "ignore".into())]
+        );
+        // Replace is wholesale.
+        store.set_task_tools(id, &[("code.exe".into(), "tool".into())]).unwrap();
+        assert_eq!(store.list_task_tools(id).unwrap().len(), 1);
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn app_class_and_usage_upsert() {
+        let (store, path) = temp_store("class");
+        assert_eq!(store.app_class("code.exe").unwrap(), None);
+        store.set_app_class("code.exe", "favorite").unwrap();
+        assert_eq!(store.app_class("code.exe").unwrap().as_deref(), Some("favorite"));
+        store.set_app_class("code.exe", "hidden").unwrap(); // upsert
+        assert_eq!(store.app_class("code.exe").unwrap().as_deref(), Some("hidden"));
+
+        store.upsert_app_usage("code.exe", 120, 1000).unwrap();
+        store.upsert_app_usage("code.exe", 200, 2000).unwrap();
+        let (m, r): (i64, i64) = store
+            .conn
+            .query_row(
+                "SELECT minutes_90d, refreshed_at FROM app_usage WHERE app_name = 'code.exe'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((m, r), (200, 2000));
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 /// Persisted `mode_override` label → [`Mode`]; unknown/NULL → `None` (classify at

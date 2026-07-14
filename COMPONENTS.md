@@ -70,7 +70,7 @@ nudge-bot/
 | `aw_query.rs` | At trigger + check-in edges only: GET `localhost:5600/api/0/...` (minimal blocking HTTP, short timeout, e.g. `ureq` or raw winhttp — no async runtime) or read AW's SQLite directly (`C:\Users\harri\AppData\Local\activitywatch`). Drives on/off-task mode pick (foreground app vs. productive-app list). AW absent/down = default OFF-TASK mode + plain check-in. |
 | `shutdown.rs` | Named quit event + console ctrl handler (existing, verified). |
 | `reload.rs` | Named reload event (existing, verified). |
-| `persist.rs` | SQLite: `sessions` rows for prompt_shown, mode fired (on/off-task + classification result), escalation_level_reached, ack, snooze, skip, checkin_answer, click_through. NEW `tasks` table (title, desc, deadline, type, recur, trigger mode, source: manual/gmail/gcal, gcal_event_id) — svc reads read-only; nudge-app is the writer; reload event signals changes. Drop `unlocks`/`pending_changes`. |
+| `persist.rs` | SQLite: `sessions` rows for prompt_shown, mode fired (on/off-task + classification result), escalation_level_reached, ack, snooze, skip, checkin_answer, click_through. `tasks` table (title, desc, deadline, type, recur, trigger mode, source: manual/gmail/gcal, gcal_event_id, **`estimate_minutes`/`logged_minutes` §6.3**) — svc reads read-only EXCEPT the sanctioned single-column `logged_minutes` UPDATE-by-rowid (`set_logged_minutes`, §3); nudge-app is the writer of every other column; reload event signals changes. `task_tools(task_id, app_name, kind)` shared reader table (svc reads at Phase-3 sample compare), byte-identical with the app schema. Additive Phase-2 migration via ALTER-ignore. Drop `unlocks`/`pending_changes`. |
 
 ### crates/nudge-ctl (CLI)
 | File | Responsibility |
@@ -97,6 +97,7 @@ nudge-bot/
 ## Connection Contract
 
 - svc is the only writer of state; core is pure; ctl writes rules (validated, atomic) and signals named events.
+- **`tasks` writer split (§3):** nudge-app owns every `tasks` column and the app-only tables (`app_classes`, `app_usage` classification/usage, plus `task_tools`). The svc's *only* sanctioned write into `tasks` is `logged_minutes` (single UPDATE by rowid, `persist::set_logged_minutes`) — any other svc→`tasks` write is a contract violation. `task_tools` is created byte-identical in both `persist.rs` and `db.rs` because the svc reads it at the sample edge.
 - Every effect (timer arm, window create) has a paired teardown in the same state-exit path.
 - No thread pools, no async runtime, no background tick. Any PR introducing a periodic timer with period < next-edge, or any mechanic that blocks/intercepts user activity, must be rejected.
 - **Named-event literals (`Local\nudge-bot-quit`, `Local\nudge-bot-reload`) are duplicated as string
