@@ -56,6 +56,7 @@ nudge-bot/
 | `rules.rs` | Parse/validate `rules.toml`: tasks (name, days, start time, prompt text), per-task escalation ladder (step offsets, max level, repeat interval, sound on/off), snooze default, check-in offset, anchor style. Fixed-size structs. No blocklists, no delay/unlock fields. |
 | `schedule.rs` | Given rules + now, compute **next edge timestamp** (single value the svc arms a timer for). Unchanged core; edge kinds extended (TaskStart / EscalationStep / SnoozeExpiry / CheckIn). |
 | `escalate.rs` | Pure ladder: `(rule, prompt_shown_at, now) -> (level, next_step_at)`. Deterministic; no timers of its own. |
+| `task_window.rs` | Pure `display_list(tasks, logged, now, cfg) -> Vec<Row>` (§6.8 dynamic-deadline horizon + §6.9 row styling). Sole owner of task-list select/sort/window/style; svc popups + app `TaskListPanel` consume its rows verbatim. No OS/clock/I/O. |
 
 ### crates/nudge-svc
 | File | Responsibility |

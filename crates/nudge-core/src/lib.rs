@@ -5,6 +5,7 @@ pub mod escalate;
 pub mod rules;
 pub mod schedule;
 pub mod state;
+pub mod task_window;
 pub mod tasks;
 
 /// Seconds since Unix epoch, injected by the caller (svc owns the clock).
