@@ -47,6 +47,20 @@ impl Db {
                  app_name TEXT    NOT NULL,
                  kind     TEXT    NOT NULL DEFAULT 'tool',
                  PRIMARY KEY (task_id, app_name, kind)
+             );
+             -- Global app classification (§6.2). `class`: favorite / normal /
+             -- hidden / not_tool. App-owned; drives the Tools selector's ordering
+             -- and hides never-relevant apps from the sample compare.
+             CREATE TABLE IF NOT EXISTS app_classes (
+                 app_name TEXT PRIMARY KEY,
+                 class    TEXT NOT NULL DEFAULT 'normal'
+             );
+             -- AW usage cache (§6.2 selector sort). Refreshed on the GCal cadence
+             -- (Phase 4+); bounded to known apps, so it stays tiny.
+             CREATE TABLE IF NOT EXISTS app_usage (
+                 app_name     TEXT PRIMARY KEY,
+                 minutes_90d  INTEGER NOT NULL DEFAULT 0,
+                 refreshed_at INTEGER
              );",
         )
         .expect("schema");
@@ -74,6 +88,12 @@ impl Db {
         ] {
             let _ = conn.execute(col, []);
         }
+        // Record the schema generation (§3 additive migration guard). The
+        // ADD-COLUMN idiom above already makes every migration idempotent; this
+        // stamp is the forward-compat marker future destructive migrations would
+        // branch on. 2 = Phase-2 shape (estimate/logged + task_tools/app_classes/
+        // app_usage).
+        let _ = conn.execute_batch("PRAGMA user_version = 2;");
         Self { conn }
     }
 
@@ -157,6 +177,37 @@ impl Db {
             })
             .expect("query tasks");
         rows.map(|r| r.expect("task row")).collect()
+    }
+
+    /// Read a task's tool list (§6.4/§6.8), as `(app_name, kind)` pairs where
+    /// `kind` is `"tool"` or `"ignore"`. The svc reads this read-only at the
+    /// Phase-3 sample compare (foreground app ∈ this task's tools?); the app is
+    /// the sole writer. Ordered by `app_name` for a stable sequence.
+    pub fn task_tools(&self, task_id: i64) -> Vec<(String, String)> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT app_name, kind FROM task_tools
+                 WHERE task_id = ?1 ORDER BY app_name",
+            )
+            .expect("prepare task_tools");
+        let rows = stmt
+            .query_map([task_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query task_tools");
+        rows.map(|r| r.expect("task_tool row")).collect()
+    }
+
+    /// Global classification for an app (§6.2): `favorite` / `normal` / `hidden`
+    /// / `not_tool`. Unset → `None` (treated as `normal`). App-owned; read-only
+    /// here.
+    pub fn app_class(&self, app_name: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT class FROM app_classes WHERE app_name = ?1",
+                [app_name],
+                |r| r.get(0),
+            )
+            .ok()
     }
 
     /// The **one** sanctioned svc write into `tasks` (§3, budget callout): update
@@ -277,6 +328,78 @@ mod tests {
 
         // Unknown id affects nothing.
         assert_eq!(db.set_logged_minutes(9999, 10), 0);
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // task_tools round-trips per task, carrying tool vs. ignore kinds, and the
+    // reader scopes to the requested task_id.
+    #[test]
+    fn task_tools_round_trip() {
+        let path = temp_db("tooltbl");
+        let db = Db::open(path.clone());
+        db.conn
+            .execute_batch(
+                "INSERT INTO task_tools (task_id, app_name, kind) VALUES
+                    (1, 'code.exe', 'tool'),
+                    (1, 'chrome.exe', 'tool'),
+                    (1, 'slack.exe', 'ignore'),
+                    (2, 'blender.exe', 'tool');",
+            )
+            .unwrap();
+
+        let t1 = db.task_tools(1);
+        assert_eq!(
+            t1,
+            vec![
+                ("chrome.exe".into(), "tool".into()),
+                ("code.exe".into(), "tool".into()),
+                ("slack.exe".into(), "ignore".into()),
+            ]
+        );
+        assert_eq!(db.task_tools(2), vec![("blender.exe".into(), "tool".into())]);
+        assert!(db.task_tools(3).is_empty());
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // app_classes / app_usage tables exist and round-trip; unset class → None.
+    #[test]
+    fn app_classes_and_usage_round_trip() {
+        let path = temp_db("appmeta");
+        let db = Db::open(path.clone());
+        db.conn
+            .execute_batch(
+                "INSERT INTO app_classes (app_name, class) VALUES
+                    ('code.exe', 'favorite'), ('game.exe', 'not_tool');
+                 INSERT INTO app_usage (app_name, minutes_90d, refreshed_at)
+                    VALUES ('code.exe', 4200, 1234);",
+            )
+            .unwrap();
+
+        assert_eq!(db.app_class("code.exe").as_deref(), Some("favorite"));
+        assert_eq!(db.app_class("game.exe").as_deref(), Some("not_tool"));
+        assert_eq!(db.app_class("unknown.exe"), None);
+
+        // app_usage is app-side (selector sort); assert the row landed.
+        let mins: i64 = db
+            .conn
+            .query_row(
+                "SELECT minutes_90d FROM app_usage WHERE app_name = 'code.exe'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mins, 4200);
+
+        // Schema generation stamped.
+        let ver: i64 = db
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, 2);
 
         drop(db);
         let _ = std::fs::remove_file(&path);

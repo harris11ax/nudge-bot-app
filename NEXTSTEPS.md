@@ -24,6 +24,11 @@ Last completed: session 41 — 10e Gmail/GCal connectors: `gmail.rs` (gmail.read
   permitted ONLY while STARTED+unpaused. Dynamic window scale by remaining work. Off-task list
   ≤12 rows + not-started red-outline at <24h. Single `task_window.rs` core module, zero UI logic.
   Gentle "It's okay" copy on No.
+  - Progress (PLAN-step1.md phases): **P1 ✅** `task_window.rs` pure `display_list` (§6.8/§6.9), 59 core tests.
+    **P2 ✅ (2026-07-14)** data-model + additive migration: `tasks.estimate_minutes`/`logged_minutes`,
+    `task_tools`/`app_classes`/`app_usage` tables, `set_logged_minutes` (sole svc write), `task_tools()`/
+    `app_class()` readers, `PRAGMA user_version = 2`; svc persist tests green. **P3** STARTED sampling edge +
+    lazy logged_minutes, **P4** OFF-task check-in + Pause — remaining. Not committed.
 
 ## Session model: Sonnet (default) | Opus gate on planning/complex design | Haiku for trivial tasks
 - Read NEXTSTEPS.md at start. Scan for incomplete steps:
