@@ -7,7 +7,14 @@
   // cached events still show, just flagged with the offline banner.
   import { onMount } from "svelte";
   import { store } from "./store.svelte.js";
-  import { listCalendars, refreshCalendars, listEvents, googleLastRefresh } from "./api.js";
+  import {
+    listCalendars,
+    refreshCalendars,
+    listEvents,
+    googleLastRefresh,
+    createEvent,
+    updateEvent,
+  } from "./api.js";
 
   const DAY_MS = 24 * 3600 * 1000;
   const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
@@ -152,6 +159,111 @@
           minute: "2-digit",
         })}`
   );
+
+  // --- create/edit dialog (10c: write path, primary calendar only) ---
+
+  let dialog = $state(/** @type {null | object} */ (null));
+  let dialogErr = $state("");
+  let dialogSaving = $state(false);
+
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+  function isoDateLocal(d) {
+    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  }
+  // All-day events are stored with UTC-midnight civil-date bounds (matches the
+  // backend's `unix_to_date_only`/`parse_date_only`) — decode with UTC getters.
+  function isoDateUtc(unixSec) {
+    const d = new Date(unixSec * 1000);
+    return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+  }
+  function hhmmLocal(d) {
+    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  }
+
+  function openCreate(d) {
+    dialog = {
+      mode: "create",
+      eventId: null,
+      summary: "",
+      date: isoDateLocal(d),
+      allDay: false,
+      startTime: "09:00",
+      endTime: "10:00",
+    };
+    dialogErr = "";
+  }
+
+  function openEdit(e) {
+    dialog = {
+      mode: "edit",
+      eventId: e.event_id,
+      summary: e.summary,
+      date: e.all_day ? isoDateUtc(e.start_unix) : isoDateLocal(new Date(e.start_unix * 1000)),
+      allDay: e.all_day,
+      startTime: e.all_day ? "09:00" : hhmmLocal(new Date(e.start_unix * 1000)),
+      endTime: e.all_day ? "10:00" : hhmmLocal(new Date(e.end_unix * 1000)),
+    };
+    dialogErr = "";
+  }
+
+  function closeDialog() {
+    dialog = null;
+  }
+
+  function onDialogKeydown(ev) {
+    if (ev.key === "Escape") closeDialog();
+  }
+
+  // Enter/Space activation for the non-<button> clickable grid cells below
+  // (a day cell can't itself be a <button> since it contains event/deadline
+  // items that are buttons too — nested buttons are invalid HTML).
+  function activateOnKey(fn) {
+    return (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        fn(ev);
+      }
+    };
+  }
+
+  async function submitDialog(ev) {
+    ev.preventDefault();
+    if (!dialog.summary.trim()) {
+      dialogErr = "Title is required.";
+      return;
+    }
+    const [y, m, d] = dialog.date.split("-").map(Number);
+    let start_unix, end_unix;
+    if (dialog.allDay) {
+      start_unix = Math.floor(Date.UTC(y, m - 1, d) / 1000);
+      end_unix = Math.floor(Date.UTC(y, m - 1, d + 1) / 1000);
+    } else {
+      start_unix = Math.floor(new Date(`${dialog.date}T${dialog.startTime}`).getTime() / 1000);
+      end_unix = Math.floor(new Date(`${dialog.date}T${dialog.endTime}`).getTime() / 1000);
+    }
+    if (end_unix <= start_unix) {
+      dialogErr = "End must be after start.";
+      return;
+    }
+    const payload = { summary: dialog.summary.trim(), start_unix, end_unix, all_day: dialog.allDay };
+    dialogSaving = true;
+    dialogErr = "";
+    try {
+      if (dialog.mode === "create") {
+        await createEvent(payload);
+      } else {
+        await updateEvent(dialog.eventId, payload);
+      }
+      dialog = null;
+      await loadEvents();
+    } catch (err) {
+      dialogErr = String(err);
+    } finally {
+      dialogSaving = false;
+    }
+  }
 </script>
 
 <header class="head">
@@ -178,17 +290,38 @@
   {#each gridDays as d (dayKey(d))}
     {@const inMonth = d.getMonth() === cursor.getMonth()}
     {@const isToday = d.getTime() === today.getTime()}
-    <div class="cal-day" class:out={!inMonth} class:today={isToday}>
+    <div
+      class="cal-day"
+      class:out={!inMonth}
+      class:today={isToday}
+      role="button"
+      tabindex="0"
+      onclick={() => openCreate(d)}
+      onkeydown={activateOnKey(() => openCreate(d))}
+      title="Click to add an event"
+    >
       <span class="cal-daynum">{d.getDate()}</span>
       <div class="cal-items">
         {#each deadlinesOn(d) as t (t.id)}
-          <div class="cal-item deadline" title={t.title}>⏱ {t.title}</div>
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="cal-item deadline" title={t.title} onclick={(ev) => ev.stopPropagation()}>⏱ {t.title}</div>
         {/each}
         {#each eventsOn(d) as e (e.event_id)}
           <div
             class="cal-item event"
             style={calColor(e.calendar_id) ? `--evt-color:${calColor(e.calendar_id)}` : ""}
-            title={e.summary}
+            title={`${e.summary} (click to edit)`}
+            role="button"
+            tabindex="0"
+            onclick={(ev) => {
+              ev.stopPropagation();
+              openEdit(e);
+            }}
+            onkeydown={activateOnKey((ev) => {
+              ev.stopPropagation();
+              openEdit(e);
+            })}
           >
             {#if eventTime(e)}<span class="cal-time">{eventTime(e)}</span>{/if}
             {e.summary}
@@ -214,4 +347,35 @@
     </ul>
     <p class="hint">Toggle which calendars overlay here from Settings.</p>
   </section>
+{/if}
+
+{#if dialog}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="overlay" onclick={closeDialog} onkeydown={onDialogKeydown}>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="dialog card" onclick={(ev) => ev.stopPropagation()}>
+      <h2>{dialog.mode === "create" ? "New event" : "Edit event"}</h2>
+      <form onsubmit={submitDialog} class="grid">
+        <label class="wide">Title<input bind:value={dialog.summary} required /></label>
+        <label class="wide inline-check">
+          <input type="checkbox" bind:checked={dialog.allDay} />
+          All day
+        </label>
+        <label class="wide">Date<input type="date" bind:value={dialog.date} required /></label>
+        {#if !dialog.allDay}
+          <label>Start<input type="time" bind:value={dialog.startTime} required /></label>
+          <label>End<input type="time" bind:value={dialog.endTime} required /></label>
+        {/if}
+        {#if dialogErr}<p class="error wide">{dialogErr}</p>{/if}
+        <div class="wide dialog-actions">
+          <button type="button" onclick={closeDialog}>Cancel</button>
+          <button class="primary" type="submit" disabled={dialogSaving}>
+            {dialogSaving ? "Saving…" : dialog.mode === "create" ? "Create" : "Save"}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
 {/if}

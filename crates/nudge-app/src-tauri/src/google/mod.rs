@@ -5,6 +5,7 @@
 //! on top of it — Gmail (10e) follows the same shape later.
 
 pub mod calendar;
+pub mod gmail;
 pub mod oauth;
 
 use crate::db::config_dir;
@@ -99,9 +100,20 @@ pub fn google_status() -> ConnectState {
     }
 }
 
-/// Scopes requested by the Calendar-read work that immediately follows this
-/// session (10b) — requesting it now avoids a second consent round.
-const SCOPES: &[&str] = &["https://www.googleapis.com/auth/calendar.readonly"];
+/// Scopes requested at connect time. `calendar.readonly` covers 10b's list
+/// calls; `calendar.events` (10c) additionally allows `events.insert`/
+/// `events.update` on the primary calendar. A user who connected before 10c
+/// only holds the narrower scope — `google_connect` re-runs full consent
+/// (`oauth.rs` always sends `prompt=consent`), so reconnecting picks up the
+/// wider grant.
+/// `gmail.readonly` (10e) is added last; a user connected before 10e holds only
+/// the calendar scopes, so `google_connect`'s `prompt=consent` re-consent picks
+/// up Gmail when they reconnect.
+const SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/gmail.readonly",
+];
 
 /// Run the PKCE loopback consent flow and cache the resulting tokens. Blocks
 /// on the system browser + one redirect; Tauri runs sync commands off the

@@ -1,22 +1,51 @@
 <script>
   import { onMount } from "svelte";
-  import { googleStatus, googleConnect, listCalendars, setCalendarSelected } from "./api.js";
+  import {
+    googleStatus,
+    googleConnect,
+    listCalendars,
+    setCalendarSelected,
+    primaryCalendar,
+    setPrimaryCalendar,
+  } from "./api.js";
 
   // 10a: OAuth plumbing (google/mod.rs + oauth.rs). 10b adds the per-calendar
-  // overlay checkboxes below, driving what the Calendar tab renders.
+  // overlay checkboxes below, driving what the Calendar tab renders. 10c adds
+  // the primary-calendar picker: the single calendar create/edit events write to.
   let status = $state("not_configured");
   let connecting = $state(false);
   let error = $state("");
   let calendars = $state(/** @type {Array} */ ([]));
+  let primary = $state(/** @type {string | null} */ (null));
 
   async function load() {
     status = await googleStatus();
-    if (status === "connected") await loadCalendars();
+    if (status === "connected") {
+      await loadCalendars();
+      await loadPrimary();
+    }
   }
 
   async function loadCalendars() {
     try {
       calendars = await listCalendars();
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
+  async function loadPrimary() {
+    try {
+      primary = await primaryCalendar();
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
+  async function pickPrimary(gcalId) {
+    try {
+      await setPrimaryCalendar(gcalId);
+      primary = gcalId;
     } catch (err) {
       error = String(err);
     }
@@ -73,6 +102,24 @@
               <span class="cal-swatch" style={c.bg_color ? `background:${c.bg_color}` : ""}></span>
               {c.summary || c.gcal_id}
               {#if c.is_primary}<span class="chip">primary</span>{/if}
+            </label>
+          </li>
+        {/each}
+      </ul>
+      <h3 class="cal-settings-h">Write target</h3>
+      <p class="hint">Event create/edit writes to exactly one calendar.</p>
+      <ul class="cal-checklist">
+        {#each calendars as c (c.gcal_id)}
+          <li>
+            <label>
+              <input
+                type="radio"
+                name="primary-calendar"
+                checked={primary === c.gcal_id}
+                onchange={() => pickPrimary(c.gcal_id)}
+              />
+              <span class="cal-swatch" style={c.bg_color ? `background:${c.bg_color}` : ""}></span>
+              {c.summary || c.gcal_id}
             </label>
           </li>
         {/each}

@@ -26,6 +26,10 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Google OAuth token exchange/refresh + (10b+) Calendar/Gmail REST calls.
 # Blocking, no async — same idiom as nudge-draft's Anthropic client.
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+# Local time-of-day extraction from a deadline unix when an accepted suggestion
+# becomes a one-shot (`Recur::Once`) task — the svc schedules by local
+# minutes-since-midnight, so the app derives that here (sole writer of `tasks`).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Win32 named-event signal so the resident svc live-reloads after a write, matching
 # nudge-ctl's `Local\nudge-bot-reload` path (no new IPC surface). Also: WM_COPYDATA

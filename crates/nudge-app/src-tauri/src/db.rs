@@ -6,9 +6,11 @@
 //! creates an identical schema.
 
 use crate::google::calendar::{CalendarInfo, EventInfo};
+use chrono::{Local, TimeZone, Timelike};
 use nudge_core::tasks::{Recur, Task, TriggerSource};
 use nudge_core::Mode;
 use rusqlite::OptionalExtension;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// `%LOCALAPPDATA%\nudge-bot` — the shared config/data dir, mirroring the svc's
@@ -21,6 +23,17 @@ pub fn config_dir() -> PathBuf {
 /// Path to the shared session/tasks database.
 pub fn db_path() -> PathBuf {
     config_dir().join("sessions.db")
+}
+
+/// Local minutes-since-midnight of a unix instant, in the machine's local
+/// timezone — the same clock the svc's `local_now()` samples, so a one-shot
+/// task's synthesized window opens at its deadline's wall-clock time. Falls back
+/// to 0 for the (impossible on a valid deadline) out-of-range case.
+fn local_minutes_of_day(unix: i64) -> u32 {
+    match Local.timestamp_opt(unix, 0).single() {
+        Some(dt) => dt.hour() * 60 + dt.minute(),
+        None => 0,
+    }
 }
 
 pub struct Store {
@@ -75,6 +88,20 @@ impl Store {
              CREATE TABLE IF NOT EXISTS meta (
                  key   TEXT PRIMARY KEY,
                  value TEXT NOT NULL
+             );
+             -- App-only inbox (10d): candidate tasks surfaced from connectors
+             -- (Gmail/GCal, 10e) awaiting a user Accept/Dismiss. Distinct from
+             -- `tasks` so a connector's guess never lands as a live trigger
+             -- without a human in the loop.
+             CREATE TABLE IF NOT EXISTS suggested_triggers (
+                 id             INTEGER PRIMARY KEY,
+                 title          TEXT    NOT NULL,
+                 description    TEXT    NOT NULL DEFAULT '',
+                 deadline       INTEGER,
+                 source         TEXT    NOT NULL DEFAULT 'manual',
+                 gcal_event_id  TEXT,
+                 status         TEXT    NOT NULL DEFAULT 'pending',
+                 created_unix   INTEGER NOT NULL DEFAULT 0
              );",
         )?;
         Ok(Self { conn })
@@ -233,6 +260,66 @@ impl Store {
         rows.collect()
     }
 
+    /// Upsert a single event locally (optimistic write-before-push, or the
+    /// authoritative row echoed back by `events.insert`/`events.update`).
+    /// Unlike [`Self::replace_events`] this touches exactly one row.
+    pub fn upsert_event(&self, calendar_id: &str, e: &EventInfo) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO cal_events
+                (event_id, calendar_id, summary, start_unix, end_unix, all_day, updated_unix, etag)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(event_id) DO UPDATE SET
+                 calendar_id  = excluded.calendar_id,
+                 summary      = excluded.summary,
+                 start_unix   = excluded.start_unix,
+                 end_unix     = excluded.end_unix,
+                 all_day      = excluded.all_day,
+                 updated_unix = excluded.updated_unix,
+                 etag         = excluded.etag",
+            rusqlite::params![
+                e.event_id,
+                calendar_id,
+                e.summary,
+                e.start_unix,
+                e.end_unix,
+                e.all_day as i64,
+                e.updated_unix,
+                e.etag,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remove one cached event row (used to drop a create's temporary local id
+    /// once the authoritative row from Google is upserted in its place).
+    pub fn delete_event(&self, event_id: &str) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "DELETE FROM cal_events WHERE event_id = ?1",
+            rusqlite::params![event_id],
+        )
+    }
+
+    /// App-chosen write-target calendar (`meta.primary_gcal_id`, 10c's picker).
+    /// Falls back to whichever calendar Google itself reports as primary
+    /// (`calendars.is_primary`) if the user hasn't picked one explicitly yet.
+    pub fn primary_calendar_id(&self) -> rusqlite::Result<Option<String>> {
+        if let Some(id) = self.get_meta("primary_gcal_id")? {
+            return Ok(Some(id));
+        }
+        self.conn
+            .query_row(
+                "SELECT gcal_id FROM calendars WHERE is_primary = 1 LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+    }
+
+    /// Set the app-chosen write-target calendar (Settings — Calendar picker).
+    pub fn set_primary_calendar(&self, gcal_id: &str) -> rusqlite::Result<()> {
+        self.set_meta("primary_gcal_id", gcal_id)
+    }
+
     /// Read a `meta` kv value (e.g. `google_last_refresh`), or `None` if unset.
     pub fn get_meta(&self, key: &str) -> rusqlite::Result<Option<String>> {
         self.conn
@@ -253,6 +340,142 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// Pending suggested triggers (Triggers tab — Suggested section), newest first.
+    pub fn list_suggested_triggers(&self) -> rusqlite::Result<Vec<SuggestedTriggerRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, description, deadline, source, gcal_event_id, created_unix
+             FROM suggested_triggers WHERE status = 'pending' ORDER BY id DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(SuggestedTriggerRow {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                description: r.get(2)?,
+                deadline: r.get(3)?,
+                source: r.get(4)?,
+                gcal_event_id: r.get(5)?,
+                created_unix: r.get(6)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Insert a fresh suggestion (connector ingest, 10e). Returns the assigned rowid.
+    pub fn insert_suggested_trigger(
+        &self,
+        title: &str,
+        description: &str,
+        deadline: Option<i64>,
+        source: &str,
+        gcal_event_id: Option<&str>,
+        created_unix: i64,
+    ) -> rusqlite::Result<i64> {
+        self.conn.execute(
+            "INSERT INTO suggested_triggers
+                (title, description, deadline, source, gcal_event_id, status, created_unix)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'pending', ?6)",
+            rusqlite::params![title, description, deadline, source, gcal_event_id, created_unix],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Accept a suggestion: insert it into `tasks` (trigger_source carried over),
+    /// mark the suggestion accepted, and return the new task's rowid. Rejects if
+    /// the suggestion isn't pending (already accepted/dismissed, or unknown id).
+    pub fn accept_suggested_trigger(&self, id: i64) -> rusqlite::Result<i64> {
+        let row: SuggestedTriggerRow = self.conn.query_row(
+            "SELECT id, title, description, deadline, source, gcal_event_id, created_unix
+             FROM suggested_triggers WHERE id = ?1 AND status = 'pending'",
+            rusqlite::params![id],
+            |r| {
+                Ok(SuggestedTriggerRow {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    description: r.get(2)?,
+                    deadline: r.get(3)?,
+                    source: r.get(4)?,
+                    gcal_event_id: r.get(5)?,
+                    created_unix: r.get(6)?,
+                })
+            },
+        )?;
+        // A one-shot task schedules by local minutes-since-midnight on its
+        // deadline's date (see nudge-core `schedule::Win::from_task`). Derive that
+        // time-of-day from the deadline so the accepted suggestion actually fires;
+        // a deadline-less suggestion (e.g. undated Gmail) stays a planner-only row.
+        let minutes = row.deadline.map(local_minutes_of_day);
+        let task = Task {
+            id: None,
+            title: row.title,
+            desc: row.description,
+            deadline: row.deadline,
+            task_type: String::new(),
+            minutes,
+            recur: Recur::Once,
+            mode_override: None,
+            trigger_source: TriggerSource::from_label(&row.source),
+            gcal_event_id: row.gcal_event_id,
+        };
+        let task_id = self.insert(&task)?;
+        self.conn.execute(
+            "UPDATE suggested_triggers SET status = 'accepted' WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        Ok(task_id)
+    }
+
+    /// Every Google Calendar event id already claimed — either mirrored as a
+    /// task or sitting as a pending suggestion. The connector (10e) checks this
+    /// before depositing a gcal candidate so an event never doubles up across a
+    /// live task and the inbox, or across successive connector runs.
+    pub fn known_gcal_event_ids(&self) -> rusqlite::Result<HashSet<String>> {
+        let mut set = HashSet::new();
+        let mut stmt = self.conn.prepare(
+            "SELECT gcal_event_id FROM tasks WHERE gcal_event_id IS NOT NULL
+             UNION
+             SELECT gcal_event_id FROM suggested_triggers
+                 WHERE gcal_event_id IS NOT NULL AND status = 'pending'",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for id in rows {
+            set.insert(id?);
+        }
+        Ok(set)
+    }
+
+    /// Titles of pending suggestions from a given `source` (e.g. `"gmail"`).
+    /// Gmail candidates carry no stable external id in this schema, so the
+    /// connector dedups them by title — re-scanning the same email yields the
+    /// same title and is skipped.
+    pub fn pending_titles_for_source(&self, source: &str) -> rusqlite::Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT title FROM suggested_triggers WHERE source = ?1 AND status = 'pending'",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![source], |r| r.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<HashSet<String>>>()
+    }
+
+    /// Dismiss a suggestion without creating a task.
+    pub fn dismiss_suggested_trigger(&self, id: i64) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE suggested_triggers SET status = 'dismissed' WHERE id = ?1",
+            rusqlite::params![id],
+        )?;
+        Ok(())
+    }
+}
+
+/// Row shape for [`Store::list_suggested_triggers`] — a connector-surfaced
+/// candidate task awaiting user Accept/Dismiss.
+pub struct SuggestedTriggerRow {
+    pub id: i64,
+    pub title: String,
+    pub description: String,
+    pub deadline: Option<i64>,
+    pub source: String,
+    pub gcal_event_id: Option<String>,
+    pub created_unix: i64,
 }
 
 /// Row shape for [`Store::list_calendars`] — the app-local overlay/selection

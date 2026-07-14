@@ -1,25 +1,24 @@
 # NEXTSTEPS.md
-<!-- Boundary: forward-looking task queue only. Session history lives in HISTORY.md
-     (interim home until a GitHub repo exists to hold it as issues/wiki instead). -->
+<!-- Boundary: forward-looking task queue only. Session history lives in HISTORY.md.
+     Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below
+     for branch/commit/PR conventions now that this is a real remote, not just a local tree. -->
 
-Last completed: session 38 — hardened nudge-app launch (`scripts\launch-both.ps1` always rebuilds
-via `tauri build`). Full history: [HISTORY.md](HISTORY.md).
+Last completed: session 41 — 10e Gmail/GCal connectors: `gmail.rs` (gmail.readonly) + `connectors.rs`
+(GCal events + actionable Gmail → suggested_triggers, deduped) + `run_connectors` command + Triggers-tab
+"Scan Gmail + Calendar" button. Full history: [HISTORY.md](HISTORY.md).
 
 ## Next steps
-- [ ] **1 — 10c — Calendar WRITE (primary only)** | **Sonnet** | ~2h
-  Primary-calendar picker (`set_primary_calendar`), `events.insert`/`update` on primary only, create/edit
-  dialog with optimistic local cache write then push. Scope `calendar.events`. Depends on 10b (done).
-
-- [ ] **2 — 10d — Suggested-triggers inbox** | **Sonnet** | ~2h
-  App-only `suggested_triggers` table (schema live, empty). Triggers-tab "Suggested" section with source
-  badge; Accept → insert `tasks`(trigger_source) + signal_reload; Dismiss → mark. Depends on 10a (done).
-
-- [ ] **3 — 10e — Gmail/GCal connectors** | **Opus** | ~1d
+- [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
   `gmail.rs` (gmail.readonly) + `connectors.rs`: GCal events + email candidates → suggested_triggers,
-  dedup vs tasks.gcal_event_id + pending. Optional nudge-draft LLM to phrase title / infer time.
-  BLOCKED end-to-end on deferred once/deadline-only task firing (per-task done-flag). Depends on 10d.
+  deduped vs tasks.gcal_event_id + pending. nudge-draft LLM title/time pass DEFERRED (binary crate, needs
+  lib split). END-TO-END UNBLOCKED (feature/once-task-firing): `Recur::Once` tasks now fire via a
+  date-anchor — `schedule::Win` carries `on_date` (the deadline instant); a once task is live only on the
+  day whose local midnight..+24h contains its deadline, so it fires exactly once (the date passes) with NO
+  completion flag needed, and past-dated once tasks contribute no future edge. `accept_suggested_trigger`
+  derives `minutes` (local time-of-day) from the deadline via chrono so the synthesized window opens at the
+  right wall-clock time. Deadline-only tasks (no time-of-day) and undated-once suggestions remain deferred.
 
-- [ ] **4 — 11–12 — UI addendum (task tools, check-in flow, dynamic deadline windows, style settings)** | **Opus** | Planning run required.
+- [ ] **1 — 11–12 — UI addendum (task tools, check-in flow, dynamic deadline windows, style settings)** | **Opus** | Planning run required.
   Details in NEXTSTEPS.md §11–§12 (task-tool selector, AW-usage sort, ON/OFF check-in popups,
   tray Pause menu, calendar-event auto-pause, GCal refresh caps). Budget: 5-min AW sampling edge
   permitted ONLY while STARTED+unpaused. Dynamic window scale by remaining work. Off-task list
@@ -37,6 +36,25 @@ via `tauri build`). Full history: [HISTORY.md](HISTORY.md).
 - On completion, log the session to HISTORY.md (not this file) via the nextsteps-classifier skill.
 - If all done: end routine, confirm completion.
 - If NEXTSTEPS.md absent/empty: scan project for planned features, add next logical step to the list.
+
+## GitHub Workflow
+- **Remote**: `https://github.com/harris11ax/nudge-bot-app.git`, `main` tracking `origin/main` (verified linked, session 39).
+- **Status quo (as of session 40)**: only one commit is actually pushed (`ade2023`, "Initial commit"). All
+  work since — sessions 2–40 per HISTORY.md — exists only in the local working tree/history, uncommitted.
+  Until the user asks to commit/push, treat NEXTSTEPS.md/HISTORY.md as still describing *uncommitted*
+  progress; don't claim something is "on GitHub" unless `git log`/`git status` confirms it.
+- **Branch strategy**: `main` is production-ready. Feature work goes on branches: `feature/description`,
+  `fix/description`. One NEXTSTEPS step per branch.
+- **Commit messages**: Clear, concise, reference the NEXTSTEPS step (e.g., "10c: Add primary calendar picker").
+- **PR workflow**: One step per PR, opened via `gh pr create` once `gh` is available/authenticated in this
+  environment (not currently — `gh` is absent from PATH here). Link the PR description to the relevant
+  NEXTSTEPS step. Request review before merge.
+- **Commits/pushes are still explicit-permission actions** (per this environment's safety rules) — write
+  them to disk and report readiness, but don't `git add`/`commit`/`push` without the user asking in the
+  same turn.
+- **Issues/Wiki migration**: HISTORY.md's per-session log is a candidate for GitHub Issues (one issue per
+  NEXTSTEPS step) or the repo Wiki once the user wants that split — not done yet; needs `gh` auth or a
+  manual pass, and is a deliberate ask, not an assumed default.
 
 ## Open Decisions
 - Max snoozes per prompt? (currently unlimited, each just logged.)

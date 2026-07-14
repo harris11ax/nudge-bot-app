@@ -1,5 +1,53 @@
 <script>
-  import { quickAdd, createTask } from "./store.svelte.js";
+  import { onMount } from "svelte";
+  import {
+    quickAdd,
+    createTask,
+    store,
+    refreshSuggestedTriggers,
+    acceptSuggestion,
+    dismissSuggestion,
+    scanConnectors,
+  } from "./store.svelte.js";
+
+  onMount(refreshSuggestedTriggers);
+
+  const sourceLabel = { manual: "Manual", gmail: "Gmail", gcal: "Calendar" };
+  let suggestionErr = $state("");
+  let scanning = $state(false);
+  let scanMsg = $state("");
+
+  async function scan() {
+    suggestionErr = "";
+    scanMsg = "";
+    scanning = true;
+    try {
+      const s = await scanConnectors();
+      scanMsg = `Added ${s.gcal_added} from Calendar, ${s.gmail_added} from Gmail (${s.gmail_scanned} scanned).`;
+    } catch (err) {
+      suggestionErr = String(err);
+    } finally {
+      scanning = false;
+    }
+  }
+
+  async function accept(id) {
+    suggestionErr = "";
+    try {
+      await acceptSuggestion(id);
+    } catch (err) {
+      suggestionErr = String(err);
+    }
+  }
+
+  async function dismiss(id) {
+    suggestionErr = "";
+    try {
+      await dismissSuggestion(id);
+    } catch (err) {
+      suggestionErr = String(err);
+    }
+  }
 
   // Quick-add: `text @ time [recur]`, parsed by nudge-core via the backend so the
   // grammar has exactly one implementation.
@@ -70,6 +118,34 @@
 <header class="head"><h1>Triggers</h1></header>
 
 <section class="card">
+  <div class="suggested-head">
+    <h2>Suggested</h2>
+    <button onclick={scan} disabled={scanning}>{scanning ? "Scanning…" : "Scan Gmail + Calendar"}</button>
+  </div>
+  {#if suggestionErr}<p class="error">{suggestionErr}</p>{/if}
+  {#if scanMsg}<p class="ok">{scanMsg}</p>{/if}
+  {#if store.suggestedTriggers.length}
+    <ul class="suggested-list">
+      {#each store.suggestedTriggers as s (s.id)}
+        <li class="suggested-row">
+          <span class="badge">{sourceLabel[s.source] ?? s.source}</span>
+          <span class="suggested-title">{s.title}</span>
+          {#if s.deadline}
+            <span class="suggested-deadline">{new Date(s.deadline * 1000).toLocaleString()}</span>
+          {/if}
+          <span class="suggested-actions">
+            <button class="primary" onclick={() => accept(s.id)}>Accept</button>
+            <button onclick={() => dismiss(s.id)}>Dismiss</button>
+          </span>
+        </li>
+      {/each}
+    </ul>
+  {:else}
+    <p class="hint">No pending suggestions. Scan to pull actionable mail and upcoming events.</p>
+  {/if}
+</section>
+
+<section class="card">
   <h2>Quick add</h2>
   <p class="hint">Format: <code>text @ time [recur]</code> — e.g. <code>gym @ 17:30 mon,wed,fri</code></p>
   <form onsubmit={submitQuick} class="quickadd">
@@ -101,3 +177,28 @@
   {#if formErr}<p class="error">{formErr}</p>{/if}
   {#if formOk}<p class="ok">{formOk}</p>{/if}
 </section>
+
+<style>
+  .suggested-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+  .suggested-head h2 { margin: 0; }
+  .suggested-list { list-style: none; margin: 0; padding: 0; }
+  .suggested-row {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.4rem 0;
+    border-bottom: 1px solid var(--border, #333);
+  }
+  .suggested-row:last-child { border-bottom: none; }
+  .badge {
+    font-size: 0.75rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 1rem;
+    background: var(--accent-muted, #2a2a3a);
+    color: var(--accent, #8ab4ff);
+    white-space: nowrap;
+  }
+  .suggested-title { flex: 1; }
+  .suggested-deadline { font-size: 0.85rem; opacity: 0.7; }
+  .suggested-actions { display: flex; gap: 0.4rem; }
+</style>

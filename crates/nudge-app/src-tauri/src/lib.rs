@@ -3,12 +3,14 @@
 //! All heavy logic (quick-add grammar, recur specs, mode labels) lives in
 //! nudge-core / [`db`] so this file stays a serialization + wiring seam.
 
+mod connectors;
 mod db;
 mod google;
 #[cfg(windows)]
 mod ipc;
 
-use db::{CalendarRow, EventRow, Store};
+use db::{CalendarRow, EventRow, Store, SuggestedTriggerRow};
+use google::calendar::EventInfo;
 use nudge_core::tasks::{parse_quickadd, Recur, Task, TriggerSource};
 use nudge_core::Mode;
 use serde::{Deserialize, Serialize};
@@ -165,6 +167,66 @@ fn insert_and_reload(mut task: Task) -> Result<TaskDto, String> {
     Ok(TaskDto::from(task))
 }
 
+// --- Suggested-triggers inbox (10d) ---
+
+/// Wire shape of a pending suggestion (Triggers tab — Suggested section).
+#[derive(Serialize)]
+pub struct SuggestedTriggerDto {
+    pub id: i64,
+    pub title: String,
+    pub description: String,
+    pub deadline: Option<i64>,
+    pub source: String,
+    pub gcal_event_id: Option<String>,
+    pub created_unix: i64,
+}
+
+impl From<SuggestedTriggerRow> for SuggestedTriggerDto {
+    fn from(r: SuggestedTriggerRow) -> Self {
+        SuggestedTriggerDto {
+            id: r.id,
+            title: r.title,
+            description: r.description,
+            deadline: r.deadline,
+            source: r.source,
+            gcal_event_id: r.gcal_event_id,
+            created_unix: r.created_unix,
+        }
+    }
+}
+
+/// Pending suggestions, newest first.
+#[tauri::command]
+fn list_suggested_triggers() -> Result<Vec<SuggestedTriggerDto>, String> {
+    let store = open()?;
+    let rows = store
+        .list_suggested_triggers()
+        .map_err(|e| format!("list suggested triggers: {e}"))?;
+    Ok(rows.into_iter().map(SuggestedTriggerDto::from).collect())
+}
+
+/// Accept a suggestion: creates the live task and pings the svc, returning the
+/// new task's id.
+#[tauri::command]
+fn accept_suggested_trigger(id: i64) -> Result<i64, String> {
+    let store = open()?;
+    let task_id = store
+        .accept_suggested_trigger(id)
+        .map_err(|e| format!("accept suggested trigger: {e}"))?;
+    db::signal_reload();
+    Ok(task_id)
+}
+
+/// Dismiss a suggestion; no task is created.
+#[tauri::command]
+fn dismiss_suggested_trigger(id: i64) -> Result<(), String> {
+    let store = open()?;
+    store
+        .dismiss_suggested_trigger(id)
+        .map_err(|e| format!("dismiss suggested trigger: {e}"))?;
+    Ok(())
+}
+
 // --- Calendar (10b, read-only) ---
 
 /// Wire shape of a calendar for the Svelte frontend (Settings checkboxes +
@@ -311,6 +373,183 @@ fn google_last_refresh() -> Result<Option<i64>, String> {
         .and_then(|s| s.parse().ok()))
 }
 
+/// Connector run result surfaced to the Triggers tab as a toast.
+#[derive(Serialize)]
+pub struct ConnectorSummaryDto {
+    pub gcal_added: usize,
+    pub gmail_added: usize,
+    pub gmail_scanned: usize,
+}
+
+/// Run the Gmail/GCal connectors (10e): scan upcoming calendar events + recent
+/// actionable mail and deposit deduped candidates into the Suggested-triggers
+/// inbox. Piggybacks a refresh so the calendar cache is fresh first; a Gmail
+/// failure surfaces as `Err` but any calendar suggestions already deposited
+/// persist. The frontend refreshes the Suggested section on success.
+#[tauri::command]
+fn run_connectors() -> Result<ConnectorSummaryDto, String> {
+    // Ensure the calendar cache the connector reads from is current.
+    refresh_calendars(false)?;
+    let store = open()?;
+    let token = google::access_token()?;
+    let s = connectors::run_connectors(&store, &token, now_unix())?;
+    Ok(ConnectorSummaryDto {
+        gcal_added: s.gcal_added,
+        gmail_added: s.gmail_added,
+        gmail_scanned: s.gmail_scanned,
+    })
+}
+
+// --- Calendar (10c, write — primary calendar only) ---
+
+/// The app-chosen write-target calendar id, or `None` if not yet picked (and
+/// Google hasn't reported one as primary either — e.g. before first refresh).
+#[tauri::command]
+fn primary_calendar() -> Result<Option<String>, String> {
+    let store = open()?;
+    store
+        .primary_calendar_id()
+        .map_err(|e| format!("primary calendar: {e}"))
+}
+
+/// Set the write-target calendar (Settings — Calendar picker).
+#[tauri::command]
+fn set_primary_calendar(gcal_id: String) -> Result<(), String> {
+    let store = open()?;
+    store
+        .set_primary_calendar(&gcal_id)
+        .map_err(|e| format!("set primary calendar: {e}"))
+}
+
+/// Create/edit dialog payload — unix-second bounds already resolved by the
+/// frontend (same convention as [`EventDto`]/[`EventRow`]).
+#[derive(Deserialize)]
+pub struct EventForm {
+    pub summary: String,
+    pub start_unix: i64,
+    pub end_unix: i64,
+    #[serde(default)]
+    pub all_day: bool,
+}
+
+fn require_primary_calendar(store: &Store) -> Result<String, String> {
+    store
+        .primary_calendar_id()
+        .map_err(|e| format!("primary calendar: {e}"))?
+        .ok_or_else(|| "no primary calendar set — pick one in Settings first".to_string())
+}
+
+/// Create an event on the primary calendar. Writes an optimistic local row
+/// under a temporary id first (so a push failure still leaves *something*
+/// visible offline, per GOOGLE-PLAN.md constraint #4), then pushes to Google
+/// synchronously — this command's architecture is blocking end-to-end like
+/// every other Google call here (no async runtime in this crate), so
+/// "optimistic" describes write ordering, not a non-blocking UI: on success the
+/// temp row is swapped for the authoritative one; on failure the temp row is
+/// left in place and the error is surfaced to the caller.
+#[tauri::command]
+fn create_event(form: EventForm) -> Result<EventDto, String> {
+    let store = open()?;
+    let calendar_id = require_primary_calendar(&store)?;
+
+    let temp_id = format!("local-{}-{}", now_unix(), std::process::id());
+    let optimistic = EventInfo {
+        event_id: temp_id.clone(),
+        summary: form.summary.clone(),
+        start_unix: form.start_unix,
+        end_unix: form.end_unix,
+        all_day: form.all_day,
+        updated_unix: now_unix(),
+        etag: String::new(),
+    };
+    store
+        .upsert_event(&calendar_id, &optimistic)
+        .map_err(|e| format!("optimistic insert: {e}"))?;
+
+    let token = google::access_token()?;
+    let pushed = google::calendar::create_event(
+        &token,
+        &calendar_id,
+        &form.summary,
+        form.start_unix,
+        form.end_unix,
+        form.all_day,
+    );
+    match pushed {
+        Ok(authoritative) => {
+            store
+                .delete_event(&temp_id)
+                .map_err(|e| format!("drop temp event: {e}"))?;
+            store
+                .upsert_event(&calendar_id, &authoritative)
+                .map_err(|e| format!("cache created event: {e}"))?;
+            Ok(EventDto {
+                event_id: authoritative.event_id,
+                calendar_id,
+                summary: authoritative.summary,
+                start_unix: authoritative.start_unix,
+                end_unix: authoritative.end_unix,
+                all_day: authoritative.all_day,
+            })
+        }
+        Err(e) => Err(format!(
+            "saved locally, but push to Google failed (will retry next refresh): {e}"
+        )),
+    }
+}
+
+/// Update an existing event's summary/time on the primary calendar. Same
+/// optimistic-then-push shape as [`create_event`], but the id is already known
+/// so there's no temp-row swap — a failed push just leaves the optimistic
+/// (new) values cached locally alongside the surfaced error.
+#[tauri::command]
+fn update_event(event_id: String, form: EventForm) -> Result<EventDto, String> {
+    let store = open()?;
+    let calendar_id = require_primary_calendar(&store)?;
+
+    let optimistic = EventInfo {
+        event_id: event_id.clone(),
+        summary: form.summary.clone(),
+        start_unix: form.start_unix,
+        end_unix: form.end_unix,
+        all_day: form.all_day,
+        updated_unix: now_unix(),
+        etag: String::new(),
+    };
+    store
+        .upsert_event(&calendar_id, &optimistic)
+        .map_err(|e| format!("optimistic update: {e}"))?;
+
+    let token = google::access_token()?;
+    let pushed = google::calendar::update_event(
+        &token,
+        &calendar_id,
+        &event_id,
+        &form.summary,
+        form.start_unix,
+        form.end_unix,
+        form.all_day,
+    );
+    match pushed {
+        Ok(authoritative) => {
+            store
+                .upsert_event(&calendar_id, &authoritative)
+                .map_err(|e| format!("cache updated event: {e}"))?;
+            Ok(EventDto {
+                event_id: authoritative.event_id,
+                calendar_id,
+                summary: authoritative.summary,
+                start_unix: authoritative.start_unix,
+                end_unix: authoritative.end_unix,
+                all_day: authoritative.all_day,
+            })
+        }
+        Err(e) => Err(format!(
+            "saved locally, but push to Google failed (will retry next refresh): {e}"
+        )),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(windows)]
@@ -338,7 +577,15 @@ pub fn run() {
             set_calendar_selected,
             refresh_calendars,
             list_events,
-            google_last_refresh
+            google_last_refresh,
+            primary_calendar,
+            set_primary_calendar,
+            create_event,
+            update_event,
+            list_suggested_triggers,
+            accept_suggested_trigger,
+            dismiss_suggested_trigger,
+            run_connectors
         ])
         .run(tauri::generate_context!())
         .expect("error while running nudge-app");

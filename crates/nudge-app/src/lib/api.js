@@ -39,3 +39,32 @@ export const listEvents = (from, to) => invoke("list_events", { from, to });
 
 /** @returns {Promise<number|null>} last successful Google refresh (unix seconds), or null if never. */
 export const googleLastRefresh = () => invoke("google_last_refresh");
+
+/** @returns {Promise<string|null>} the app's chosen write-target calendar id, or null if unpicked. */
+export const primaryCalendar = () => invoke("primary_calendar");
+
+/** Set the write-target calendar (Settings — Calendar picker). */
+export const setPrimaryCalendar = (gcalId) => invoke("set_primary_calendar", { gcalId });
+
+/** Create an event on the primary calendar (optimistic local write, then push). */
+export const createEvent = (form) => invoke("create_event", { form });
+
+/** Update an existing event's summary/time on the primary calendar. */
+export const updateEvent = (eventId, form) => invoke("update_event", { eventId, form });
+
+/** @returns {Promise<Array>} pending suggested triggers (connector inbox, 10d), newest first. */
+export const listSuggestedTriggers = () => invoke("list_suggested_triggers");
+
+/** Accept a suggestion: creates the live task, returns its new id. */
+export const acceptSuggestedTrigger = (id) => invoke("accept_suggested_trigger", { id });
+
+/** Dismiss a suggestion without creating a task. */
+export const dismissSuggestedTrigger = (id) => invoke("dismiss_suggested_trigger", { id });
+
+/**
+ * Run the Gmail/GCal connectors (10e): refresh the calendar cache, then scan
+ * upcoming events + recent actionable mail and deposit deduped candidates into
+ * the Suggested inbox.
+ * @returns {Promise<{gcal_added:number, gmail_added:number, gmail_scanned:number}>}
+ */
+export const runConnectors = () => invoke("run_connectors");
