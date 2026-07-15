@@ -50,7 +50,7 @@ impl Default for WindowCfg {
 }
 
 /// One display row, fully computed and ready to paint.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     pub task_id: i64,
     pub title: String,

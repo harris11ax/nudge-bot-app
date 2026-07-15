@@ -44,6 +44,13 @@ sample_secs = 0                # e.g. 300 to sample every 5 min
 # elsewhere never triggers it. Which apps count as on-task comes from the task's
 # own tool list, falling back to [classify] productive_apps below.
 off_task_secs = 300
+# Answering "Take a break" to that check-in silences everything for this long,
+# then puts you back on the task (UI-PLAN §6.5).
+break_secs = 600
+# Tray > Pause silences everything for this long (UI-PLAN §6.6). A pause is a
+# real pause: no window opens and no check-in fires until it expires, or until
+# you pick Tray > Resume.
+pause_secs = 1800
 
 [classify]
 # On/off-task mode pick (UI-PLAN §1). When a nudge window opens, nudge-svc asks

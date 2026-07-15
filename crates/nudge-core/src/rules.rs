@@ -69,6 +69,10 @@ pub struct Escalation {
     /// fires (§6.5). Measured from the first off-task sample, so with the default
     /// cadence it takes two consecutive off-task samples to cross.
     pub off_task_secs: i64,
+    /// How long "Take a break" from the §6.5 check-in silences everything.
+    pub break_secs: i64,
+    /// How long a tray Pause silences everything (§6.6).
+    pub pause_secs: i64,
 }
 
 impl Default for Escalation {
@@ -81,6 +85,8 @@ impl Default for Escalation {
             checkin_after_secs: 0,
             sample_secs: 0,
             off_task_secs: 5 * 60,
+            break_secs: 10 * 60,
+            pause_secs: 30 * 60,
         }
     }
 }
@@ -181,6 +187,8 @@ pub fn parse(toml_src: &str) -> Result<Rules, RulesError> {
         || esc.snooze_secs < 0
         || esc.sample_secs < 0
         || esc.off_task_secs < 0
+        || esc.break_secs < 0
+        || esc.pause_secs < 0
     {
         return Err(RulesError::Invalid("escalation: negative duration".into()));
     }

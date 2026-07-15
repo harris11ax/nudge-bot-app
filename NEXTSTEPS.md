@@ -3,9 +3,8 @@
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below
      for branch/commit/PR conventions now that this is a real remote, not just a local tree. -->
 
-Last completed: session 41 — 10e Gmail/GCal connectors: `gmail.rs` (gmail.readonly) + `connectors.rs`
-(GCal events + actionable Gmail → suggested_triggers, deduped) + `run_connectors` command + Triggers-tab
-"Scan Gmail + Calendar" button. Full history: [HISTORY.md](HISTORY.md).
+Last completed: session 43 — Step 1 / PLAN-step1 **Phase 4** (the last phase of the Step-1 slice):
+OFF-task check-in Yes/No + §6.5 task list + Take-a-break + tray Pause. Full history: [HISTORY.md](HISTORY.md).
 
 ## Next steps
 - [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
@@ -18,7 +17,9 @@ Last completed: session 41 — 10e Gmail/GCal connectors: `gmail.rs` (gmail.read
   derives `minutes` (local time-of-day) from the deadline via chrono so the synthesized window opens at the
   right wall-clock time. Deadline-only tasks (no time-of-day) and undated-once suggestions remain deferred.
 
-- [ ] **1 — 11–12 — UI addendum (task tools, check-in flow, dynamic deadline windows, style settings)** | **Opus** | Planning run required.
+- [x] **1 — 11–12 — UI addendum (task tools, check-in flow, dynamic deadline windows, style settings)** | **Opus** |
+  DONE session 43 — the Step-1 slice (PLAN-step1 Phases 1–4) is complete. Tier B/C remain deferred; see
+  "Next up" below for what they became.
   Details in NEXTSTEPS.md §11–§12 (task-tool selector, AW-usage sort, ON/OFF check-in popups,
   tray Pause menu, calendar-event auto-pause, GCal refresh caps). Budget: 5-min AW sampling edge
   permitted ONLY while STARTED+unpaused. Dynamic window scale by remaining work. Off-task list
@@ -35,9 +36,26 @@ Last completed: session 41 — 10e Gmail/GCal connectors: `gmail.rs` (gmail.read
     raises the drift check-in, returning on-task resets it. svc: `sample_due` gate + `foreground_on_task`
     (task_tools → productive_apps fallback; `ignore` kind, AW-down, and nothing-configured all read on-task)
     + one-cadence `logged_minutes` accrual at the edge. 106 workspace tests green. Not committed.
-    **P4** OFF-task check-in Yes/No + task list + Take-a-break + Pause (§6.5/§6.6) — remaining. Note P4 will
-    need `CheckIn { kind }` (PLAN §2): P3 routes the drift check-in through the existing kindless `CheckIn`,
-    where Ack resumes sampling and Skip stops it — the interactive Yes/No + `ShowTaskList` split is P4's.
+    **P4 ✅ (2026-07-15)** OFF-task check-in Yes/No + task list + Take-a-break + Pause (§6.5/§6.6):
+    `CheckInKind::{Periodic,OffTask}`; `Choosing`/`Paused`/`Break` states; `ShowTaskList`/`HideTaskList`;
+    `EdgeKind::{PauseExpiry,BreakExpiry}`; `Buttons` as core data; new svc `tasklist.rs` painting
+    `display_list` rows verbatim; tray Pause/Resume with `[escalation] break_secs`/`pause_secs`.
+    Pause is handled *before* the `!in_window` collapse and arms a bare expiry edge — that is what makes a
+    pause outlive its window and stay silent. 122 workspace tests green. Not committed.
+
+- [ ] **2 — Drive P4's UI end-to-end once** | **Sonnet** | ~1h — UNSKIPPABLE before Tier B builds on it.
+  P4's core is unit-tested and the svc boots clean, but the new *windows* have never been driven: task-list
+  render, Yes/No hit-test, tray Pause. Needs a scratch `rules.toml` with a live window + `sample_secs` in
+  the seconds, run svc, drift off-task, answer No, click a row, take a break, Pause/Resume. Do **not** edit
+  `%LOCALAPPDATA%\nudge-bot\rules.toml` in place — back it up or point the svc at a temp config dir first.
+  Watch for: the list stealing focus (`WS_EX_NOACTIVATE` must hold), a stale list surviving its window.
+
+- [ ] **3 — Tier B: ON-task check-in (§6.4) + tool classification screen + rich Tools selector (§6.2)** | **Opus** | Planning run required.
+  Deferred from Step 1 on purpose (PLAN §1): §6.4 overlaps §6.5's mechanics but needs the classification UI,
+  and building it before that UI exists means building it twice. `CheckInKind` gains its `OnTask` variant
+  here — that is the variant PLAN §2 named and P4 deliberately left out as dead code.
+  Also lands here: a row click switching the live window to the *picked* task (P4 resolves the check-in but
+  ignores the row's `task_id` — PLAN Tier C), and a tray Pause *submenu* of durations.
 
 ## Session model: Sonnet (default) | Opus gate on planning/complex design | Haiku for trivial tasks
 - Read NEXTSTEPS.md at start. Scan for incomplete steps:

@@ -33,6 +33,14 @@ pub enum EdgeKind {
     /// structurally absent (`sample_at == None`) everywhere else, so an idle or
     /// paused machine has no sample edge to wake on (zero-polling, PLAN §7).
     Sample,
+    /// A tray Pause (§6.6) expired: resume supervision. While paused this is the
+    /// *only* edge armed — the schedule edge is deliberately not merged, so
+    /// nothing can fire mid-pause; it is recomputed fresh on resume.
+    PauseExpiry,
+    /// A §6.5 Take-a-break expired: resume the task. Same single-edge silencing
+    /// as `PauseExpiry`, kept distinct so the outcomes log can tell a chosen
+    /// break from a tray pause.
+    BreakExpiry,
 }
 
 impl EdgeKind {
@@ -46,6 +54,8 @@ impl EdgeKind {
             EdgeKind::SnoozeExpiry => "snooze_expiry",
             EdgeKind::CheckIn => "check_in",
             EdgeKind::Sample => "sample",
+            EdgeKind::PauseExpiry => "pause_expiry",
+            EdgeKind::BreakExpiry => "break_expiry",
         }
     }
 }

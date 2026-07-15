@@ -25,6 +25,7 @@ nudge-bot/
 │   │   ├── src/main.rs
 │   │   ├── src/timers.rs
 │   │   ├── src/overlay.rs     # extend: interactive prompt levels L0–L2
+│   │   ├── src/tasklist.rs    # NEW: §6.5 task-list window (paints display_list rows)
 │   │   ├── src/sound.rs       # NEW: single PlaySound per escalation edge
 │   │   ├── src/tray.rs
 │   │   ├── src/hotkey.rs
@@ -63,9 +64,10 @@ nudge-bot/
 |---|---|
 | `main.rs` | Boot: load rules, restore state from SQLite, arm next-edge timer, enter message loop. Owns teardown of all handles. Edge-gated AW probes: `checkin_due` (presence), `taskstart_due` (mode), `sample_due` (§6.1 foreground drift). `foreground_on_task()` does the sample compare — the task's own `task_tools` list first, else global `[classify] productive_apps`; `ignore`-kind tools count as on-task; AW-down or nothing-configured reads as on-task. On an on-task sample it folds one cadence into `logged_minutes` via `set_logged_minutes` (the sanctioned svc→tasks write, §3) — lazy at the edge, never ticked. |
 | `timers.rs` | `CreateWaitableTimerEx` wrapper, absolute-time, coalescing 30 s idle / tighter while PROMPTING. Exactly **one** timer armed at any moment (next edge of any kind). Wait set: `[timer, quit, reload]`. |
-| `overlay.rs` | Anchor/prompt window, two render modes (UI-PLAN.md §1). OFF-TASK: centered high-contrast panel, one-shot slide-in, escalation L0–L2. ON-TASK: slim muted peripheral strip, no motion, auto-fade. Buttons `[Start] [Snooze] [Skip]` hit-tested; click-through launches/focuses nudge-app at the task page. Never full-screen, never steals focus, never blocks input. Destroyed outside PROMPTING/STARTED. |
+| `overlay.rs` | Anchor/prompt window, two render modes (UI-PLAN.md §1). OFF-TASK: centered high-contrast panel, one-shot slide-in, escalation L0–L2. ON-TASK: slim muted peripheral strip, no motion, auto-fade. Button set is core's data (`state::Buttons`), not the overlay's choice: `[Start][Snooze][Skip]` for a task prompt, `[Yes][No][Break]` for a §6.5 drift check-in; packed into `GWLP_USERDATA` so paint and hit-test can't disagree. Click-through launches/focuses nudge-app at the task page. Never full-screen, never steals focus, never blocks input. Destroyed outside PROMPTING/STARTED. |
+| `tasklist.rs` | §6.5 task-list window: layered/topmost/`NOACTIVATE`, centred, destroyed on drop. Paints `Effect::ShowTaskList`'s rows — which arrive from `task_window::display_list` already selected, sorted, capped and styled — and hit-tests them: a row click sends `Start` ("I'm on it"), the footer sends `Break`. Zero select/sort/style logic (§6.9). Height bounded by `WindowCfg::max_rows`. |
 | `sound.rs` | One `PlaySound(SND_ASYNC)` per qualifying escalation edge. No loops, no mixer state held. |
-| `tray.rs` | tray-icon crate. Menu: status, Start now (ack), Snooze, Skip today, Toggle anchor, Reload rules, Quit. |
+| `tray.rs` | tray-icon crate. Menu: status, Start now (ack), Snooze, Skip today, Toggle anchor, **Pause / Resume** (§6.6), Reload rules, Quit. Pause/Resume are always enabled — core ignores a Resume when nothing is paused; the pause duration comes from `[escalation] pause_secs`, stamped on in `main.rs` (the loop holds no rules). |
 | `hotkey.rs` | `RegisterHotKey` — Ctrl+Alt+N acknowledges current prompt / toggles anchor. Trigger trait for future hardware. |
 | `aw_query.rs` | At trigger + check-in **+ sample** edges only: GET `localhost:5600/api/0/...` (minimal blocking HTTP, short timeout, e.g. `ureq` or raw winhttp — no async runtime) or read AW's SQLite directly (`C:\Users\harri\AppData\Local\activitywatch`). Drives on/off-task mode pick (foreground app vs. productive-app list). AW absent/down = default OFF-TASK mode + plain check-in; at a sample edge, AW-down reads as **on-task** (no signal must never manufacture drift). |
 | `shutdown.rs` | Named quit event + console ctrl handler (existing, verified). |

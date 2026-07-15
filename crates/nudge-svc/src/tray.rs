@@ -8,6 +8,12 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 pub enum TrayCmd {
     Toggle,
+    /// Silence everything for the configured `[escalation] pause_secs` (§6.6).
+    /// The duration lives in rules, so the loop hands this up rather than
+    /// building the core event itself.
+    Pause,
+    /// End a pause/break early.
+    Resume,
     Reload,
     Quit,
 }
@@ -15,6 +21,8 @@ pub enum TrayCmd {
 pub struct Tray {
     _icon: TrayIcon,
     toggle: MenuId,
+    pause: MenuId,
+    resume: MenuId,
     reload: MenuId,
     quit: MenuId,
 }
@@ -24,11 +32,19 @@ impl Tray {
     /// on the same thread that pumps messages, or callbacks won't be delivered.
     pub fn install() -> Self {
         let toggle = MenuItem::new("Toggle anchor", true, None);
+        // Pause/Resume are both always enabled: the state machine ignores a
+        // Resume when nothing is paused, so the menu needn't track live state.
+        let pause = MenuItem::new("Pause", true, None);
+        let resume = MenuItem::new("Resume", true, None);
         let reload = MenuItem::new("Reload rules", true, None);
         let quit = MenuItem::new("Quit", true, None);
 
         let menu = Menu::new();
         menu.append(&toggle).expect("append toggle");
+        menu.append(&PredefinedMenuItem::separator()).expect("append separator");
+        menu.append(&pause).expect("append pause");
+        menu.append(&resume).expect("append resume");
+        menu.append(&PredefinedMenuItem::separator()).expect("append separator");
         menu.append(&reload).expect("append reload");
         menu.append(&PredefinedMenuItem::separator()).expect("append separator");
         menu.append(&quit).expect("append quit");
@@ -43,6 +59,8 @@ impl Tray {
         Self {
             _icon: icon,
             toggle: toggle.id().clone(),
+            pause: pause.id().clone(),
+            resume: resume.id().clone(),
             reload: reload.id().clone(),
             quit: quit.id().clone(),
         }
@@ -53,6 +71,10 @@ impl Tray {
         let ev = MenuEvent::receiver().try_recv().ok()?;
         if ev.id == self.toggle {
             Some(TrayCmd::Toggle)
+        } else if ev.id == self.pause {
+            Some(TrayCmd::Pause)
+        } else if ev.id == self.resume {
+            Some(TrayCmd::Resume)
         } else if ev.id == self.reload {
             Some(TrayCmd::Reload)
         } else if ev.id == self.quit {

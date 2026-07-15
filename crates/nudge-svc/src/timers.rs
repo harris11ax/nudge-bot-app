@@ -82,6 +82,11 @@ pub enum LoopSignal {
     /// Notification click-through: launch/focus the nudge-app GUI and record the
     /// click. Carries no core `Event` — it's a pure svc-side side effect.
     OpenApp,
+    /// Tray Pause (§6.6) / Take-a-break (§6.5). Both become core events, but
+    /// their durations come from rules, which the loop deliberately doesn't hold
+    /// — main stamps them on.
+    Pause(UnixTime),
+    Break(UnixTime),
 }
 
 /// MsgWaitForMultipleObjects on {edge timer, quit event, reload event} + message
@@ -124,6 +129,10 @@ pub fn message_loop(
                 TrayCmd::Toggle => {
                     on_signal(LoopSignal::Core(Event::HotkeyToggle(local_now().unix)))
                 }
+                TrayCmd::Pause => on_signal(LoopSignal::Pause(local_now().unix)),
+                TrayCmd::Resume => {
+                    on_signal(LoopSignal::Core(Event::Resume(local_now().unix)))
+                }
                 TrayCmd::Reload => on_signal(LoopSignal::Reload),
                 TrayCmd::Quit => return,
             }
@@ -134,6 +143,9 @@ pub fn message_loop(
                 PromptClick::Start => LoopSignal::Core(Event::Ack(local_now().unix)),
                 PromptClick::Snooze => LoopSignal::Core(Event::Snooze(local_now().unix)),
                 PromptClick::Skip => LoopSignal::Core(Event::Skip(local_now().unix)),
+                PromptClick::Yes => LoopSignal::Core(Event::CheckInYes(local_now().unix)),
+                PromptClick::No => LoopSignal::Core(Event::CheckInNo(local_now().unix)),
+                PromptClick::Break => LoopSignal::Break(local_now().unix),
                 PromptClick::Open => LoopSignal::OpenApp,
             };
             on_signal(signal);

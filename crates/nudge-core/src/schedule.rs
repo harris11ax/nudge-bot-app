@@ -179,6 +179,10 @@ pub fn context_with_tasks(rules: &Rules, tasks: &[Task], now: LocalNow) -> Sched
         checkin_after_secs: rules.escalation.checkin(),
         sample_secs: rules.escalation.sample(),
         off_task_secs: rules.escalation.off_task_secs,
+        break_secs: rules.escalation.break_secs,
+        // Only a live drift check-in can be answered No, so only the svc knows
+        // when the §6.5 list is worth computing; it fills this in at that edge.
+        task_rows: Vec::new(),
         // Schedule knows nothing of live activity; the svc overrides these at the
         // relevant edge after probing AW (presence at check-in, mode at task-start,
         // foreground app at a sample edge). `foreground_on_task` defaults to true so

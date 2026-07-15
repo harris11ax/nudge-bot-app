@@ -201,3 +201,41 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
   **106/106 green**. Not committed.
 - **P4 note**: PLAN §2's `CheckIn { kind: OnTask | OffTask }` is *not* in yet — P3 routes the drift check-in
   through the existing kindless `CheckIn`. P4 needs the kind to split Yes→keep-going from No→`ShowTaskList`.
+
+## DONE session 43 (Opus) — Step 1 / PLAN-step1 Phase 4: OFF-task check-in Yes/No + task list + Break + Pause
+- **`CheckIn { kind }` landed** (the P4 note above): `CheckInKind::{Periodic, OffTask}`. Deviation from
+  PLAN §2's `OnTask | OffTask` — the on-task check-in is §6.4, an explicit Tier-B defer, so that variant
+  would be dead code; `Periodic` names the pre-existing post-ack check-in the plan's list had no name for.
+  Periodic keeps Start/Skip; OffTask is the §6.5 drift question and takes Yes/No/Break.
+- **New states**: `Choosing { shown_at }` (the §6.5 list is up — check-in family, so an ignored list dies at
+  the next schedule edge exactly as an ignored check-in does), `Paused { resume_at, was_started }`,
+  `Break { resume_at }`. New events `CheckInYes/CheckInNo/PauseFor/BreakFor/Resume`; new effects
+  `ShowTaskList { rows }` / `HideTaskList`; new `EdgeKind::{PauseExpiry, BreakExpiry}`; new outcomes
+  `CheckedInNo/Paused/BreakTaken/Resumed`.
+- **Pause is handled *before* the `!in_window` collapse** — the load-bearing bit. A pause must outlive the
+  window it started in and must arm a *bare* expiry edge with `ctx.next_edge` deliberately un-merged;
+  routing it through the normal path would have let a WindowEnd fire mid-pause. Resume re-derives from the
+  schedule as it stands then (nothing stale to honour, since nothing was armed). `was_started` exists so a
+  pause taken mid-task resumes to `Started` rather than re-nagging the user to start what they were doing.
+- **`Buttons` is core data, not overlay choice**: `ShowPrompt` now carries `Buttons::{StartSnoozeSkip,
+  YesNoBreak}`; overlay packs it into `GWLP_USERDATA` bit 9 so paint and hit-test read one source.
+- **`tasklist.rs` (new svc module)**: layered/topmost/NOACTIVATE centred window painting `display_list`
+  rows verbatim — zero select/sort/style (§6.9). Row click → `Start` ("I'm on it"); footer → `Break`.
+  Both post to overlay's existing click channel via `overlay::send_click`. Height bounded by `max_rows`.
+- **`task_list_due(state)`** gates `display_list` to a live drift check-in / open list, mirroring the
+  `sample_due`/`checkin_due` edge-gating discipline; `progress_map` reads `logged_minutes` off rows already
+  loaded, so building the list re-reads nothing.
+- **tray**: Pause / Resume (always enabled — core ignores a stray Resume). Durations from new
+  `[escalation] break_secs = 600` / `pause_secs = 1800`; `timers.rs` hands up `LoopSignal::Pause/Break` and
+  `main.rs` stamps the duration on, keeping rules out of the message loop.
+- **Tests**: 122/122 workspace green (was 106). +10 core (drift asks Yes/No & periodic doesn't, Yes resumes
+  sampling, No shows the list verbatim, ignored list dismisses at the schedule edge, Choosing resolves on
+  either answer, break silences→resumes the task, **Pause from every state arms only its expiry with the
+  schedule suppressed**, paused stays silent through every event incl. window close, resume recomputes
+  three ways, no Sample edge while paused/on-break) + 4 tasklist + 2 svc (`task_list_due`, `progress_map`).
+- **Verification honesty**: svc boots clean (AW probe OK, arms, no panic). The new *windows* — task-list
+  render, Yes/No hit-test, tray Pause — are **not** driven end-to-end; that needs a live task window plus a
+  real drift against the user's own `%LOCALAPPDATA%\nudge-bot\rules.toml`, which this session did not touch.
+- **Deferred, deliberately**: tray Pause *submenu* of durations (single configured duration for now); a row
+  click resolves the check-in but does **not** switch the live window to the picked task (PLAN Tier C,
+  app-side). Not committed.

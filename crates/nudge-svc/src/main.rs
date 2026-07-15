@@ -11,10 +11,13 @@ mod persist;
 mod reload;
 mod shutdown;
 mod sound;
+mod tasklist;
 mod timers;
 mod tray;
 
-use nudge_core::state::{next, Effect, Event, State};
+use nudge_core::state::{next, CheckInKind, Effect, Event, State};
+use nudge_core::task_window::{display_list, LoggedMap, Progress, WindowCfg};
+use nudge_core::tasks::Task;
 
 /// Reject an AW snapshot whose latest afk event ended more than this long before
 /// `now` — a watcher that stopped can't vouch for "not-afk". Generous enough to
@@ -75,9 +78,35 @@ fn taskstart_due(state: State, in_window: bool, event: &Event) -> bool {
         && matches!(event, Event::EdgeTimer(_) | Event::RulesReloaded(_))
 }
 
+/// Is a drift check-in on screen, i.e. could the very next event be the No that
+/// brings the task list up? Only then is the §6.5 list worth computing — the
+/// answer has to be ready before `next()` runs, and every other transition would
+/// be paying for a list nobody asked for.
+fn task_list_due(state: State) -> bool {
+    matches!(
+        state,
+        State::CheckIn { kind: CheckInKind::OffTask, .. } | State::Choosing { .. }
+    )
+}
+
+/// Per-task progress for `display_list`, read straight off the `tasks` rows the
+/// svc already loaded this wake (`logged_minutes` is the cache it maintains at
+/// sample edges, so no AW re-scan happens here).
+fn progress_map(tasks: &[Task]) -> LoggedMap {
+    tasks
+        .iter()
+        .filter_map(|t| {
+            Some((
+                t.id?,
+                Progress { logged: t.logged_minutes, estimate: t.estimate_minutes },
+            ))
+        })
+        .collect()
+}
+
 /// Executes effects emitted by the pure state machine. This is the only
 /// place OS resources are created/destroyed — paired per transition.
-fn run_effects(effects: Vec<Effect>, res: &mut Resources) {
+fn run_effects(effects: Vec<Effect>, now: i64, res: &mut Resources) {
     // A batch is one transition. The `ArmEdgeTimer` in it names the next edge the
     // svc will wake on; pre-scan it so the state row logged in the same batch can
     // record which kind was armed (routes ArmEdgeTimer `kind` into logging).
@@ -89,11 +118,20 @@ fn run_effects(effects: Vec<Effect>, res: &mut Resources) {
         match fx {
             // Render at the escalation level; update the live strip in place
             // (no destroy/recreate flicker) or create it on first show.
-            Effect::ShowPrompt { text, level, mode } => match &mut res.overlay {
-                Some(a) => a.update(&text, level, mode),
-                None => res.overlay = Some(overlay::Anchor::create(&text, level, mode, res.geom)),
+            Effect::ShowPrompt { text, level, mode, buttons } => match &mut res.overlay {
+                Some(a) => a.update(&text, level, mode, buttons),
+                None => {
+                    res.overlay =
+                        Some(overlay::Anchor::create(&text, level, mode, buttons, res.geom))
+                }
             },
             Effect::HidePrompt => drop(res.overlay.take()),
+            // Rows arrive fully selected/sorted/styled from `task_window`; the
+            // window below only paints them.
+            Effect::ShowTaskList { rows } => {
+                res.tasklist = Some(tasklist::TaskList::create(&rows, now))
+            }
+            Effect::HideTaskList => drop(res.tasklist.take()),
             Effect::PlaySound => sound::alert(),
             Effect::ArmEdgeTimer { at, kind: _ } => res.edge_timer.arm_absolute(at),
             Effect::LogEdge { entered, at, mode } => {
@@ -106,6 +144,8 @@ fn run_effects(effects: Vec<Effect>, res: &mut Resources) {
 
 struct Resources {
     overlay: Option<overlay::Anchor>,
+    /// The §6.5 task list, up only between a check-in's No and its resolution.
+    tasklist: Option<tasklist::TaskList>,
     /// Strip geometry from `[anchor]`; refreshed on every rules load so a live
     /// reload re-sizes/re-docks the next prompt.
     geom: overlay::AnchorGeom,
@@ -143,6 +183,7 @@ fn main() {
 
     let mut res = Resources {
         overlay: None,
+        tasklist: None,
         geom: overlay::AnchorGeom::from_rules(&rules.anchor),
         edge_timer: timers::EdgeTimer::new(),
         db: persist::Db::open(dirs_config().join("sessions.db")),
@@ -183,7 +224,7 @@ fn main() {
     }
     let (s, fx) = next(state, &boot_event, &ctx);
     state = s;
-    run_effects(fx, &mut res);
+    run_effects(fx, now.unix, &mut res);
 
     // Message loop: wakes only on edge timer, quit event, hotkey, or tray
     // messages.
@@ -202,6 +243,10 @@ fn main() {
                 return;
             }
             timers::LoopSignal::Core(e) => e,
+            // Pause/break durations live in rules, which the message loop doesn't
+            // hold; stamp them on here.
+            timers::LoopSignal::Pause(t) => Event::PauseFor(t, rules.escalation.pause_secs),
+            timers::LoopSignal::Break(t) => Event::BreakFor(t, rules.escalation.break_secs),
             timers::LoopSignal::Reload => {
                 // Re-read rules.toml from disk. On any read/parse error, keep the
                 // running rules and skip the re-evaluation (last good config stays
@@ -267,9 +312,15 @@ fn main() {
                 }
             }
         }
+        // §6.5 list: computed here, by `task_window::display_list`, so that core
+        // can hand it straight to the render on a No without either end selecting,
+        // sorting or styling anything (UI-PLAN §6.9, the one owner).
+        if task_list_due(state) {
+            ctx.task_rows = display_list(&tasks, &progress_map(&tasks), now.unix, &WindowCfg::default());
+        }
         let (s, fx) = next(state, &event, &ctx);
         state = s;
-        run_effects(fx, &mut res);
+        run_effects(fx, now.unix, &mut res);
     });
 
     // Loop returned (tray Quit, quit event, or WM_QUIT). Tear down OS resources
@@ -310,6 +361,23 @@ mod tests {
         (db, p)
     }
 
+    fn task_row(id: Option<i64>) -> Task {
+        Task {
+            id,
+            title: "t".into(),
+            desc: String::new(),
+            deadline: None,
+            task_type: String::new(),
+            minutes: None,
+            recur: nudge_core::tasks::Recur::Once,
+            mode_override: None,
+            trigger_source: nudge_core::tasks::TriggerSource::Manual,
+            gcal_event_id: None,
+            estimate_minutes: None,
+            logged_minutes: 0,
+        }
+    }
+
     fn started(sample_at: Option<i64>) -> State {
         State::Started {
             checkin_at: None,
@@ -329,9 +397,39 @@ mod tests {
         assert!(!sample_due(started(None), 9999, &Event::EdgeTimer(9999)));
         // Not Started.
         assert!(!sample_due(State::Idle, 9999, &Event::EdgeTimer(9999)));
-        assert!(!sample_due(State::CheckIn { shown_at: 1 }, 9999, &Event::EdgeTimer(9999)));
+        assert!(!sample_due(
+            State::CheckIn { shown_at: 1, kind: CheckInKind::Periodic },
+            9999,
+            &Event::EdgeTimer(9999)
+        ));
         // A user event is not a sampling edge.
         assert!(!sample_due(started(Some(1500)), 1600, &Event::Ack(1600)));
+    }
+
+    // The §6.5 list is computed only while an answer of No could actually land —
+    // a drift check-in, or the list it already opened (which a reload re-emits).
+    #[test]
+    fn task_list_due_gates_the_display_list() {
+        assert!(task_list_due(State::CheckIn { shown_at: 1, kind: CheckInKind::OffTask }));
+        assert!(task_list_due(State::Choosing { shown_at: 1 }));
+        // The periodic check-in takes Start/Skip, not Yes/No — no list to build.
+        assert!(!task_list_due(State::CheckIn { shown_at: 1, kind: CheckInKind::Periodic }));
+        assert!(!task_list_due(State::Idle));
+        assert!(!task_list_due(started(Some(1500))));
+        assert!(!task_list_due(State::Paused { resume_at: 9, was_started: true }));
+    }
+
+    // Progress comes off the rows already in hand: `logged_minutes` is the cache
+    // the sample edge maintains, so building the list re-reads nothing.
+    #[test]
+    fn progress_map_reads_the_logged_cache() {
+        let mut t = task_row(Some(7));
+        t.logged_minutes = 45;
+        t.estimate_minutes = Some(120);
+        // An unsaved row has no id, so it cannot key a map — and is skipped.
+        let m = progress_map(&[t, task_row(None)]);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[&7], Progress { logged: 45, estimate: Some(120) });
     }
 
     // A task's own tool list decides the compare, and an `ignore` app counts as
