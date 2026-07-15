@@ -43,12 +43,48 @@ OFF-task check-in Yes/No + §6.5 task list + Take-a-break + tray Pause. Full his
     Pause is handled *before* the `!in_window` collapse and arms a bare expiry edge — that is what makes a
     pause outlive its window and stay silent. 122 workspace tests green. Not committed.
 
-- [ ] **2 — Drive P4's UI end-to-end once** | **Sonnet** | ~1h — UNSKIPPABLE before Tier B builds on it.
-  P4's core is unit-tested and the svc boots clean, but the new *windows* have never been driven: task-list
-  render, Yes/No hit-test, tray Pause. Needs a scratch `rules.toml` with a live window + `sample_secs` in
-  the seconds, run svc, drift off-task, answer No, click a row, take a break, Pause/Resume. Do **not** edit
-  `%LOCALAPPDATA%\nudge-bot\rules.toml` in place — back it up or point the svc at a temp config dir first.
-  Watch for: the list stealing focus (`WS_EX_NOACTIVATE` must hold), a stale list surviving its window.
+- [x] **2 — Drive P4's UI end-to-end once** | **Sonnet** | session 44 — ran, found 2 blocking bugs, NOT clean.
+  Method: `$env:LOCALAPPDATA` pointed at a scratch dir (never touched the real
+  `%LOCALAPPDATA%\nudge-bot\rules.toml`), scratch `rules.toml` with an always-live window and
+  `sample_secs=15`/`off_task_secs=20`/`break_secs=30`/`pause_secs=30`, one task seeded into
+  `sessions.db` directly (no `nudge-ctl` task-add verb exists — only rules/status/log). Built and ran
+  `nudge-svc.exe`/`nudge-ctl.exe` for real.
+  - **Confirmed working**: anchor strip renders (`BG_L0`, correct text, `WS_EX_TOPMOST`/`NOACTIVATE`
+    strip at the configured height/position). Button *hit-testing* works — a synthetic click at the
+    Start button's computed rect (`button_rect`) correctly drove `prompting → started`
+    (`nudge-ctl status`/`log` confirmed the edge).
+  - **BUG (blocking)**: the `[Start][Snooze][Skip]`/`[Yes][No][Break]` buttons never paint. Screenshot
+    at high zoom over the whole button-cluster rect (right 192px of the strip) shows flat background,
+    no button face/frame/label — `anchor_proc`'s `WM_PAINT` button-drawing loop
+    (`crates/nudge-svc/src/overlay.rs:339-345`) runs but produces no visible output, even though the
+    *geometry* (`button_rect`) is correct enough for hit-testing to work. Likely a GDI object/paint-order
+    bug (brush not selected into `hdc`? draw call ordering vs `EndPaint`?) — needs a focused repro, not
+    diagnosed further this session. A real user cannot see what to click; this alone blocks calling P4 done.
+  - **UNVERIFIED (not blocking, ran out of budget)**: off-task drift check-in never fired in ~7 min of a
+    Started task sitting on an off-task foreground app (`sample_secs=15`, `off_task_secs=20` — should
+    have fired within ~35s). No edge-log entry beyond `started`. Could be a real second bug in
+    `sample_due`/`EdgeTimer` (session 43 wrote both same-day, untested until now), or could be an
+    artifact of driving the click via synthetic `PostMessage` instead of a real OS click (message loop
+    may process input differently). Task list render, Yes/No, Take-a-break, and tray Pause/Resume were
+    **not exercised** — blocked on reaching the check-in first.
+  - **Next**: fix the button-paint bug first (small, isolated — `overlay.rs` paint path). Then re-run this
+    same scratch-config method and get an actual off-task check-in to fire (try a real mouse click instead
+    of `PostMessage`, or add an `eprintln!` at the `sample_due`/`arm_started` call sites to confirm the
+    timer is arming) before touching Tier B.
+
+- [ ] **2b — Fix invisible prompt buttons + verify off-task check-in fires** | **Sonnet** | ~1-2h —
+  UNSKIPPABLE before Tier B, found by Step 2 (session 44). Two items, do both in one pass since both
+  need the same scratch-config driving method already set up in Step 2's notes:
+  1. Button paint bug: `crates/nudge-svc/src/overlay.rs` `anchor_proc` `WM_PAINT` handler draws buttons
+     (`button_rect` + `FillRect`/`FrameRect`/`DrawTextW`, lines ~336-347) but nothing appears on screen,
+     even though the same rects hit-test correctly on click. Diagnose (GDI brush/object selection, draw
+     order, or a clipping rect issue) and fix.
+  2. Off-task check-in never observed firing (`sample_secs=15`/`off_task_secs=20` in test config, no
+     edge after 7 min of Started). Confirm whether `sample_due`/`arm_started`/`EdgeTimer` actually arms
+     and fires under a **real** mouse click (not `PostMessage`) — Step 2 used a synthetic click to work
+     around the paint bug, which may itself be the reason sampling never triggered.
+  Once both are clean, finish driving the rest of Step 2's checklist (task-list render, Yes/No, Take-a-
+  break, tray Pause/Resume) before starting Tier B.
 
 - [ ] **3 — Tier B: ON-task check-in (§6.4) + tool classification screen + rich Tools selector (§6.2)** | **Opus** | Planning run required.
   Deferred from Step 1 on purpose (PLAN §1): §6.4 overlaps §6.5's mechanics but needs the classification UI,
