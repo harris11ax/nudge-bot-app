@@ -25,7 +25,44 @@ const CHECKIN_STALENESS_SECS: i64 = 180;
 /// pay for an AW probe — every other transition sees `Presence::Unknown`.
 fn checkin_due(state: State, now: i64, event: &Event) -> bool {
     matches!(event, Event::EdgeTimer(_) | Event::RulesReloaded(_))
-        && matches!(state, State::Started { checkin_at: Some(t) } if now >= t)
+        && matches!(state, State::Started { checkin_at: Some(t), .. } if now >= t)
+}
+
+/// Does the pending event land on a due STARTED sample edge (§6.1)? A sample edge
+/// only exists while a task is live and sampling is configured, so this is the one
+/// place drift detection costs an AW probe — there is no background tick to guard
+/// against, because outside `Started` there is no edge to fire.
+fn sample_due(state: State, now: i64, event: &Event) -> bool {
+    matches!(event, Event::EdgeTimer(_) | Event::RulesReloaded(_))
+        && matches!(state, State::Started { sample_at: Some(t), .. } if now >= t)
+}
+
+/// Is the foreground app one of the live task's tools (§6.1 sample compare)?
+///
+/// Precedence: the task's own `task_tools` list, else the global
+/// `[classify] productive_apps` list — so sampling is useful before the per-task
+/// tools selector (Tier B) exists. An `ignore`-kind tool counts as on-task: it's a
+/// task-scoped transient the user already told us not to be nagged about.
+///
+/// Two cases deliberately read as on-task rather than drift: no foreground signal
+/// at all (AW down — PLAN §7 says treat no-data as on-task), and no configured
+/// notion of on-task anywhere (empty tool list *and* empty productive-app list),
+/// which would otherwise make every single app count as drift and nag forever.
+fn foreground_on_task(
+    db: &persist::Db,
+    rules: &nudge_core::rules::Rules,
+    task_id: Option<i64>,
+    app: Option<&str>,
+) -> bool {
+    let Some(app) = app else { return true };
+    let tools = task_id.map(|id| db.task_tools(id)).unwrap_or_default();
+    if tools.is_empty() {
+        if rules.classify.productive_apps.is_empty() {
+            return true;
+        }
+        return rules.classify.mode(Some(app)) == nudge_core::Mode::OnTask;
+    }
+    tools.iter().any(|(name, _kind)| name.eq_ignore_ascii_case(app))
 }
 
 /// Is a task-window prompt about to open (Idle → Prompting)? Mode is decided
@@ -188,7 +225,8 @@ fn main() {
         };
         // Re-read the `tasks` table each wake so app edits (signaled via reload)
         // take effect; wakes are edge-only, so this stays off the hot path.
-        let mut ctx = nudge_core::schedule::context_with_tasks(&rules, &res.db.tasks(), now);
+        let tasks = res.db.tasks();
+        let mut ctx = nudge_core::schedule::context_with_tasks(&rules, &tasks, now);
         // LLM draft override: inside a task window, a fresh `draft.txt` next-step
         // replaces the static window text (and thus the check-in text too). A
         // missing/blank/stale draft leaves the rules text untouched.
@@ -212,6 +250,23 @@ fn main() {
                 .unwrap_or_else(|| rules.classify.mode(aw_query::probe().app.as_deref()));
             eprintln!("nudge mode: {}", ctx.mode.label());
         }
+        // STARTED sampling (§6.1): at a due sample edge — and only there — read the
+        // foreground app so core can extend or reset the off-task run, then fold
+        // the elapsed cadence into `logged_minutes` when the user was on-task.
+        // That write is the one sanctioned svc→tasks exception (PLAN §3): a single
+        // UPDATE by rowid at an edge, so `logged_minutes` stays a lazily-refreshed
+        // cache and is never ticked.
+        if sample_due(state, now.unix, &event) {
+            let app = aw_query::probe().app;
+            ctx.foreground_on_task =
+                foreground_on_task(&res.db, &rules, ctx.window_task_id, app.as_deref());
+            if ctx.foreground_on_task {
+                if let (Some(id), Some(secs)) = (ctx.window_task_id, ctx.sample_secs) {
+                    let logged = tasks.iter().find(|t| t.id == Some(id)).map_or(0, |t| t.logged_minutes);
+                    res.db.set_logged_minutes(id, logged + (secs / 60) as u32);
+                }
+            }
+        }
         let (s, fx) = next(state, &event, &ctx);
         state = s;
         run_effects(fx, &mut res);
@@ -228,4 +283,115 @@ fn main() {
 fn dirs_config() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA"))
         .join("nudge-bot")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RULES_BARE: &str = "[anchor]\ndefault_text = \"x\"\n";
+
+    fn rules_with_productive(apps: &str) -> nudge_core::rules::Rules {
+        let src = format!("{RULES_BARE}[classify]\nproductive_apps = [{apps}]\n");
+        nudge_core::rules::parse(&src).unwrap()
+    }
+
+    /// A temp sessions.db seeded with raw `task_tools` rows (nudge-app is the
+    /// writer in production, so the test stands in for it against the same schema).
+    fn db_with_tools(tag: &str, rows: &str) -> (persist::Db, std::path::PathBuf) {
+        let mut p = std::env::temp_dir();
+        p.push(format!("nudge-svc-test-{}-{tag}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let db = persist::Db::open(p.clone());
+        if !rows.is_empty() {
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            conn.execute_batch(rows).unwrap();
+        }
+        (db, p)
+    }
+
+    fn started(sample_at: Option<i64>) -> State {
+        State::Started {
+            checkin_at: None,
+            sample_at,
+            off_task_since: None,
+        }
+    }
+
+    // The sample probe is paid for only on a due sample edge in Started.
+    #[test]
+    fn sample_due_gates_the_probe() {
+        assert!(sample_due(started(Some(1500)), 1500, &Event::EdgeTimer(1500)));
+        assert!(sample_due(started(Some(1500)), 1600, &Event::EdgeTimer(1600)));
+        // Not yet due.
+        assert!(!sample_due(started(Some(1500)), 1400, &Event::EdgeTimer(1400)));
+        // Sampling disabled → no edge to be due.
+        assert!(!sample_due(started(None), 9999, &Event::EdgeTimer(9999)));
+        // Not Started.
+        assert!(!sample_due(State::Idle, 9999, &Event::EdgeTimer(9999)));
+        assert!(!sample_due(State::CheckIn { shown_at: 1 }, 9999, &Event::EdgeTimer(9999)));
+        // A user event is not a sampling edge.
+        assert!(!sample_due(started(Some(1500)), 1600, &Event::Ack(1600)));
+    }
+
+    // A task's own tool list decides the compare, and an `ignore` app counts as
+    // on-task rather than drift.
+    #[test]
+    fn task_tools_drive_the_compare() {
+        let (db, path) = db_with_tools(
+            "tools",
+            "INSERT INTO task_tools (task_id, app_name, kind) VALUES
+                (1, 'code.exe', 'tool'), (1, 'slack.exe', 'ignore');",
+        );
+        // The global list would call code.exe off-task; the task list wins.
+        let rules = rules_with_productive("\"chrome.exe\"");
+
+        assert!(foreground_on_task(&db, &rules, Some(1), Some("code.exe")));
+        assert!(foreground_on_task(&db, &rules, Some(1), Some("CODE.EXE"))); // case-insensitive
+        assert!(foreground_on_task(&db, &rules, Some(1), Some("slack.exe"))); // ignore → not drift
+        assert!(!foreground_on_task(&db, &rules, Some(1), Some("game.exe")));
+        // chrome.exe is globally productive but not one of *this* task's tools.
+        assert!(!foreground_on_task(&db, &rules, Some(1), Some("chrome.exe")));
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // With no per-task tools yet (selector UI is Tier B), the global
+    // productive-app list stands in.
+    #[test]
+    fn falls_back_to_global_productive_apps() {
+        let (db, path) = db_with_tools("fallback", "");
+        let rules = rules_with_productive("\"code.exe\"");
+
+        assert!(foreground_on_task(&db, &rules, Some(1), Some("code.exe")));
+        assert!(!foreground_on_task(&db, &rules, Some(1), Some("game.exe")));
+        // A rules-only window (no task id) uses the same fallback.
+        assert!(foreground_on_task(&db, &rules, None, Some("code.exe")));
+        assert!(!foreground_on_task(&db, &rules, None, Some("game.exe")));
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // The two "we can't tell" paths both read as on-task, so we never nag on a
+    // signal we don't have.
+    #[test]
+    fn unknowable_foreground_reads_as_on_task() {
+        let (db, path) = db_with_tools("unknown", "");
+
+        // AW down: no foreground app at all.
+        let rules = rules_with_productive("\"code.exe\"");
+        assert!(foreground_on_task(&db, &rules, Some(1), None));
+
+        // Nothing configured anywhere: no tool list and no productive apps, so
+        // there is no notion of on-task to drift from — every app would otherwise
+        // count as drift and nag forever.
+        let bare = nudge_core::rules::parse(RULES_BARE).unwrap();
+        assert!(foreground_on_task(&db, &bare, Some(1), Some("game.exe")));
+        assert!(foreground_on_task(&db, &bare, None, Some("anything.exe")));
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
 }

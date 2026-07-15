@@ -61,6 +61,14 @@ pub struct Escalation {
     pub snooze_secs: i64,
     /// Delay after Start before a "still on it?" check-in; 0 disables check-ins.
     pub checkin_after_secs: i64,
+    /// STARTED-mode AW sampling cadence in seconds (§6.1); 0 disables sampling.
+    /// Off by default, mirroring `checkin_after_secs` — an existing rules.toml
+    /// keeps its pre-Phase-3 behaviour until the user opts in.
+    pub sample_secs: i64,
+    /// How long a *continuous* off-task run must last before the drift check-in
+    /// fires (§6.5). Measured from the first off-task sample, so with the default
+    /// cadence it takes two consecutive off-task samples to cross.
+    pub off_task_secs: i64,
 }
 
 impl Default for Escalation {
@@ -71,6 +79,8 @@ impl Default for Escalation {
             l2_repeat_secs: 10 * 60,
             snooze_secs: 10 * 60,
             checkin_after_secs: 0,
+            sample_secs: 0,
+            off_task_secs: 5 * 60,
         }
     }
 }
@@ -88,6 +98,13 @@ impl Escalation {
     /// Check-in delay as the state machine wants it: `None` when disabled.
     pub fn checkin(&self) -> Option<i64> {
         (self.checkin_after_secs > 0).then_some(self.checkin_after_secs)
+    }
+
+    /// Sampling cadence as the state machine wants it: `None` when disabled, in
+    /// which case `Started` never carries a `sample_at` and no sample edge can be
+    /// armed at all (§6.1 zero-polling guarantee).
+    pub fn sample(&self) -> Option<i64> {
+        (self.sample_secs > 0).then_some(self.sample_secs)
     }
 }
 
@@ -159,7 +176,12 @@ pub fn parse(toml_src: &str) -> Result<Rules, RulesError> {
         }
     }
     let esc = &rules.escalation;
-    if esc.l1_after_secs < 0 || esc.l2_after_secs < 0 || esc.snooze_secs < 0 {
+    if esc.l1_after_secs < 0
+        || esc.l2_after_secs < 0
+        || esc.snooze_secs < 0
+        || esc.sample_secs < 0
+        || esc.off_task_secs < 0
+    {
         return Err(RulesError::Invalid("escalation: negative duration".into()));
     }
     if esc.l1_after_secs > esc.l2_after_secs {
@@ -213,6 +235,18 @@ text = "t"
         assert_eq!(l.l2_after_secs, 600);
         assert_eq!(r.escalation.snooze_secs, 600);
         assert_eq!(r.escalation.checkin(), None); // check-ins off by default
+        assert_eq!(r.escalation.sample(), None); // sampling off by default
+        assert_eq!(r.escalation.off_task_secs, 300);
+    }
+
+    #[test]
+    fn escalation_block_enables_sampling() {
+        let src = format!("{OK}\n[escalation]\nsample_secs = 300\noff_task_secs = 600\n");
+        let r = parse(&src).unwrap();
+        assert_eq!(r.escalation.sample(), Some(300));
+        assert_eq!(r.escalation.off_task_secs, 600);
+        // A negative cadence is rejected like every other duration.
+        assert!(parse(&format!("{OK}\n[escalation]\nsample_secs = -1\n")).is_err());
     }
 
     #[test]

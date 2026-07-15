@@ -165,3 +165,39 @@
   - STILL BLOCKED end-to-end: accepted gcal/deadline suggestions land as `Recur::Once` tasks, which
     `schedule.rs` still skips (needs the deferred per-task done-flag). Connector fills the inbox and
     accept creates the task, but one-shot firing is the remaining prereq for this to nudge.
+
+## DONE session 42 (Opus) — Step 1 / PLAN-step1 Phase 3: STARTED sampling edge + lazy logged_minutes
+The §6.1 sampling spine: once a task is Started, nudge-svc samples the foreground app on a cadence and
+notices when the user has drifted off-task. This is the state-machine half of the feature — the check-in
+it raises still uses the existing kindless prompt; the interactive Yes/No + task-list + Pause path is P4.
+
+- **Core (`lib.rs`, `state.rs`)**: new `EdgeKind::Sample`. `Started` widens to
+  `{ checkin_at, sample_at, off_task_since }`. `sample_at` is `Some` **only** in `Started` with sampling
+  configured — Idle, Prompting, a showing CheckIn, and a skipped window all carry none, so the zero-polling
+  budget (PLAN §7) holds structurally: there is no edge to wake on rather than a guard that declines to
+  fire. `off_task_since` anchors the current *continuous* off-task run; returning to a tool clears it, so a
+  glance elsewhere never accumulates toward a nag. Run ≥ `off_task_secs` → drift check-in.
+- **Single-timer invariant**: `Started` is the first state with two runtime edges. `arm_started` collapses
+  check-in + sample to their earliest, then `arm_merged` pits that against the schedule edge — still exactly
+  one `ArmEdgeTimer` per transition (asserted). `bump_if_due` pushes a sibling edge that came due on the
+  same wake to the next interval instead of re-arming it in the past (which would spin a second wake).
+- **Config (`rules.rs`, `schedule.rs`, `rules.example.toml`)**: `[escalation] sample_secs` (0 = off,
+  **default off**, mirroring `checkin_after_secs`) + `off_task_secs` (default 300). Opt-in was chosen over
+  the plan's "default 300" so an existing rules.toml keeps its pre-P3 behaviour and no one gets sampled
+  without asking.
+- **svc (`main.rs`)**: `sample_due` gate (probe AW only at a due sample edge in Started) +
+  `foreground_on_task` compare — the task's own `task_tools` list wins, else global `[classify]
+  productive_apps`. `ignore`-kind tools count as on-task. **Three "we can't tell" paths deliberately read as
+  on-task**: AW down (no foreground), nothing configured anywhere (empty tool list *and* empty
+  productive_apps — otherwise every app is drift and it nags forever), and any non-sample edge. On an
+  on-task sample, one cadence folds into `logged_minutes` via `set_logged_minutes` — the sanctioned
+  svc→tasks write (§3), lazy at the edge, never ticked.
+- **CheckIn exit**: Ack resumes sampling with a clean run; Skip stops it (matches Skip's dismiss-for-good
+  meaning). An auto-resolved presence check-in keeps the spine alive.
+- **Tests**: 12 new core tests (sample arming, earliest-of-three merge, on-task quiet re-arm, threshold
+  crossing, run reset, AW-down never drifts, **no Sample edge outside Started** across every state, skip,
+  auto-checkin bump, Ack/Skip resume/stop, nothing-due re-arm) + 4 svc tests (sample gate, task_tools
+  precedence + case-insensitivity, productive_apps fallback, unknowable→on-task). `cargo test --workspace`
+  **106/106 green**. Not committed.
+- **P4 note**: PLAN §2's `CheckIn { kind: OnTask | OffTask }` is *not* in yet — P3 routes the drift check-in
+  through the existing kindless `CheckIn`. P4 needs the kind to split Yes→keep-going from No→`ShowTaskList`.

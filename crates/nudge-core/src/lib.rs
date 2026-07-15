@@ -28,6 +28,11 @@ pub enum EdgeKind {
     SnoozeExpiry,
     /// A post-ack check-in came due ("still on X?").
     CheckIn,
+    /// A STARTED-mode AW sample fell due (§6.1): probe the foreground app to see
+    /// whether the user is still on-task. Armed *only* while `Started`-unpaused —
+    /// structurally absent (`sample_at == None`) everywhere else, so an idle or
+    /// paused machine has no sample edge to wake on (zero-polling, PLAN §7).
+    Sample,
 }
 
 impl EdgeKind {
@@ -40,6 +45,7 @@ impl EdgeKind {
             EdgeKind::EscalationStep => "escalation_step",
             EdgeKind::SnoozeExpiry => "snooze_expiry",
             EdgeKind::CheckIn => "check_in",
+            EdgeKind::Sample => "sample",
         }
     }
 }

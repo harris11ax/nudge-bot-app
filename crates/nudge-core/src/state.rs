@@ -38,7 +38,20 @@ pub enum State {
     },
     /// The task was started (or skipped) for this window; no prompt shows.
     /// `checkin_at`, when set, is the time a "still on it?" check-in falls due.
-    Started { checkin_at: Option<UnixTime> },
+    ///
+    /// `sample_at` is the §6.1 STARTED-mode AW sample edge. It is `Some` only
+    /// while sampling is configured and the task is live — a skipped window, a
+    /// showing check-in, and every non-`Started` state carry no sample edge at
+    /// all, which is how "no sampling when idle" is guaranteed structurally
+    /// rather than by a guard: with no edge there is nothing to wake on.
+    /// `off_task_since` is the start of the current *continuous* off-task run
+    /// (`None` while on-task); once `now - off_task_since >= off_task_secs` the
+    /// drift check-in fires (§6.5).
+    Started {
+        checkin_at: Option<UnixTime>,
+        sample_at: Option<UnixTime>,
+        off_task_since: Option<UnixTime>,
+    },
     /// A post-start check-in prompt is showing, awaiting the user's answer.
     CheckIn { shown_at: UnixTime },
 }
@@ -163,6 +176,16 @@ pub struct ScheduleCtx {
     pub snooze_secs: i64,
     /// Delay after Ack before a check-in falls due; `None` disables check-ins.
     pub checkin_after_secs: Option<i64>,
+    /// STARTED-mode AW sampling cadence (§6.1); `None` disables sampling, in
+    /// which case no `Started` state ever carries a `sample_at`.
+    pub sample_secs: Option<i64>,
+    /// Continuous off-task seconds that trigger the drift check-in (§6.5).
+    pub off_task_secs: i64,
+    /// Was the foreground app one of the live task's tools at a sample edge? The
+    /// svc probes AW and does the set comparison; core only branches on the
+    /// answer. `true` everywhere else (and when AW is down), so a missing signal
+    /// never manufactures an off-task run.
+    pub foreground_on_task: bool,
     /// Activity signal the svc probed from AW at a check-in edge (`Unknown`
     /// everywhere else). `Active` auto-resolves the check-in instead of nagging.
     pub presence: Presence,
@@ -233,16 +256,27 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
             )
         }
 
+        // Start: the task goes live, so this is where the sampling spine spins up
+        // (§6.1). `sample_at` exists from here until the window closes, the user
+        // skips, or a check-in takes over.
         (State::Prompting { .. }, Event::Ack(_)) => {
             let checkin_at = ctx.checkin_after_secs.map(|s| now + s);
+            let sample_at = ctx.sample_secs.map(|s| now + s);
             fx.push(Effect::HidePrompt);
             fx.push(Effect::LogEdge { entered: "started", at: now, mode: None });
             fx.push(Effect::LogOutcome {
                 outcome: Outcome::Started,
                 at: now,
             });
-            arm_merged(checkin_at.map(edge(EdgeKind::CheckIn)), ctx, &mut fx);
-            (State::Started { checkin_at }, fx)
+            arm_started(checkin_at, sample_at, ctx, &mut fx);
+            (
+                State::Started {
+                    checkin_at,
+                    sample_at,
+                    off_task_since: None,
+                },
+                fx,
+            )
         }
 
         (State::Prompting { shown_at, mode, task_id, .. }, Event::Snooze(_)) => {
@@ -264,6 +298,8 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
             )
         }
 
+        // Skip dismisses the window for good: no check-in, and no sampling either
+        // — the user said they aren't doing this, so watching them is noise.
         (State::Prompting { .. }, Event::Skip(_)) => {
             fx.push(Effect::HidePrompt);
             fx.push(Effect::LogEdge { entered: "started", at: now, mode: None });
@@ -272,54 +308,136 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
                 at: now,
             });
             arm_schedule(ctx, &mut fx);
-            (State::Started { checkin_at: None }, fx)
+            (
+                State::Started {
+                    checkin_at: None,
+                    sample_at: None,
+                    off_task_since: None,
+                },
+                fx,
+            )
         }
 
-        // Check-in falls due, or we idle in Started re-arming the check-in edge.
-        (State::Started { checkin_at }, Event::EdgeTimer(_))
-        | (State::Started { checkin_at }, Event::RulesReloaded(_)) => match checkin_at {
-            // Check-in due but AW says the user is actively at the keyboard:
-            // they're plainly still working, so resolve it silently — no prompt,
-            // logged as an auto check-in — and settle back into Started.
-            Some(t) if now >= t && ctx.presence == Presence::Active => {
-                fx.push(Effect::LogEdge { entered: "started", at: now, mode: None });
-                fx.push(Effect::LogOutcome {
-                    outcome: Outcome::AutoCheckedIn,
-                    at: now,
-                });
-                arm_schedule(ctx, &mut fx);
-                (State::Started { checkin_at: None }, fx)
+        // A due edge (check-in or sample) fired, or we're just re-arming. Two
+        // runtime edges now live in `Started`; both are merged into the single
+        // timer by `arm_started`, and whichever is actually due drives the branch.
+        (State::Started { checkin_at, sample_at, off_task_since }, Event::EdgeTimer(_))
+        | (State::Started { checkin_at, sample_at, off_task_since }, Event::RulesReloaded(_)) => {
+            // --- check-in edge (presence-informed, pre-Phase-3 behaviour) ---
+            if let Some(t) = checkin_at {
+                if now >= t {
+                    // AW says the user is actively at the keyboard: they're plainly
+                    // still working, so resolve it silently — no prompt, logged as
+                    // an auto check-in — and settle back into Started with the
+                    // sampling spine still running.
+                    if ctx.presence == Presence::Active {
+                        fx.push(Effect::LogEdge { entered: "started", at: now, mode: None });
+                        fx.push(Effect::LogOutcome {
+                            outcome: Outcome::AutoCheckedIn,
+                            at: now,
+                        });
+                        // The sample edge may have come due on this same wake;
+                        // advance it rather than re-arming a time already past.
+                        let sample_at = bump_if_due(sample_at, now, ctx.sample_secs);
+                        arm_started(None, sample_at, ctx, &mut fx);
+                        return (
+                            State::Started {
+                                checkin_at: None,
+                                sample_at,
+                                off_task_since,
+                            },
+                            fx,
+                        );
+                    }
+                    fx.push(Effect::ShowPrompt {
+                        text: checkin_text(ctx),
+                        level: Level::L0,
+                        // A check-in is a discrete "still on it?" question — render
+                        // it as an attention-getting OffTask prompt regardless of
+                        // the window's own mode.
+                        mode: Mode::OffTask,
+                    });
+                    fx.push(Effect::LogEdge { entered: "checkin", at: now, mode: Some(Mode::OffTask) });
+                    arm_schedule(ctx, &mut fx);
+                    return (State::CheckIn { shown_at: now }, fx);
+                }
             }
-            Some(t) if now >= t => {
-                fx.push(Effect::ShowPrompt {
-                    text: checkin_text(ctx),
-                    level: Level::L0,
-                    // A check-in is a discrete "still on it?" question — render it
-                    // as an attention-getting OffTask prompt regardless of the
-                    // window's own mode.
-                    mode: Mode::OffTask,
-                });
-                fx.push(Effect::LogEdge { entered: "checkin", at: now, mode: Some(Mode::OffTask) });
-                arm_schedule(ctx, &mut fx);
-                (State::CheckIn { shown_at: now }, fx)
-            }
-            other => {
-                arm_merged(other.map(edge(EdgeKind::CheckIn)), ctx, &mut fx);
-                (State::Started { checkin_at: other }, fx)
-            }
-        },
 
+            // --- sample edge (§6.1): is the user still in this task's tools? ---
+            if let Some(sa) = sample_at {
+                if now >= sa {
+                    let next_sample = ctx.sample_secs.map(|s| now + s);
+                    // On-task: nothing to say. Clear any part-built off-task run —
+                    // the threshold measures a *continuous* drift, so returning to
+                    // a tool resets it.
+                    if ctx.foreground_on_task {
+                        arm_started(checkin_at, next_sample, ctx, &mut fx);
+                        return (
+                            State::Started {
+                                checkin_at,
+                                sample_at: next_sample,
+                                off_task_since: None,
+                            },
+                            fx,
+                        );
+                    }
+                    // Off-task: the run starts at the first off-task sample and is
+                    // measured from there, so the threshold is wall-clock drift,
+                    // not a sample count.
+                    let since = off_task_since.unwrap_or(now);
+                    if now - since >= ctx.off_task_secs {
+                        fx.push(Effect::ShowPrompt {
+                            text: checkin_text(ctx),
+                            level: Level::L0,
+                            mode: Mode::OffTask,
+                        });
+                        fx.push(Effect::LogEdge { entered: "checkin", at: now, mode: Some(Mode::OffTask) });
+                        arm_schedule(ctx, &mut fx);
+                        return (State::CheckIn { shown_at: now }, fx);
+                    }
+                    arm_started(checkin_at, next_sample, ctx, &mut fx);
+                    return (
+                        State::Started {
+                            checkin_at,
+                            sample_at: next_sample,
+                            off_task_since: Some(since),
+                        },
+                        fx,
+                    );
+                }
+            }
+
+            // --- nothing due: re-arm both edges unchanged ---
+            arm_started(checkin_at, sample_at, ctx, &mut fx);
+            (
+                State::Started {
+                    checkin_at,
+                    sample_at,
+                    off_task_since,
+                },
+                fx,
+            )
+        }
+
+        // Answering a check-in returns to Started. Ack ("yes, still on it") resumes
+        // the sampling spine with a fresh off-task run; Skip ("leave me alone")
+        // stops it, matching Skip's dismiss-for-good meaning at the prompt.
         (State::CheckIn { .. }, Event::Ack(_)) | (State::CheckIn { .. }, Event::Skip(_)) => {
-            let outcome = if matches!(event, Event::Ack(_)) {
-                Outcome::CheckedIn
-            } else {
-                Outcome::Skipped
-            };
+            let acked = matches!(event, Event::Ack(_));
+            let outcome = if acked { Outcome::CheckedIn } else { Outcome::Skipped };
+            let sample_at = if acked { ctx.sample_secs.map(|s| now + s) } else { None };
             fx.push(Effect::HidePrompt);
             fx.push(Effect::LogEdge { entered: "started", at: now, mode: None });
             fx.push(Effect::LogOutcome { outcome, at: now });
-            arm_schedule(ctx, &mut fx);
-            (State::Started { checkin_at: None }, fx)
+            arm_started(None, sample_at, ctx, &mut fx);
+            (
+                State::Started {
+                    checkin_at: None,
+                    sample_at,
+                    off_task_since: None,
+                },
+                fx,
+            )
         }
 
         // Reload while showing a check-in: re-show so a restart keeps it visible.
@@ -425,6 +543,43 @@ fn arm_schedule(ctx: &ScheduleCtx, fx: &mut Vec<Effect>) {
     arm_merged(None, ctx, fx);
 }
 
+/// Arm the single timer for a `Started` state, whose two runtime edges (check-in
+/// and sample) collapse to their earliest before being merged with the schedule
+/// edge. `Started` is the only state with two runtime candidates; funnelling them
+/// through here keeps the one-armed-timer invariant a property of the code rather
+/// than of every caller remembering it.
+fn arm_started(
+    checkin_at: Option<UnixTime>,
+    sample_at: Option<UnixTime>,
+    ctx: &ScheduleCtx,
+    fx: &mut Vec<Effect>,
+) {
+    let runtime = earliest(
+        checkin_at.map(edge(EdgeKind::CheckIn)),
+        sample_at.map(edge(EdgeKind::Sample)),
+    );
+    arm_merged(runtime, ctx, fx);
+}
+
+/// The earlier of two optional edges (ties go to the first).
+fn earliest(a: Option<Edge>, b: Option<Edge>) -> Option<Edge> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(if x.at <= y.at { x } else { y }),
+        (x, y) => x.or(y),
+    }
+}
+
+/// Push an edge that has already come due out to the next interval, leaving a
+/// not-yet-due edge (or a disabled one) alone. Without this, a wake that handles
+/// one due edge would re-arm a sibling edge at a time already in the past and
+/// spin an immediate second wake.
+fn bump_if_due(at: Option<UnixTime>, now: UnixTime, secs: Option<i64>) -> Option<UnixTime> {
+    match (at, secs) {
+        (Some(a), Some(s)) if now >= a => Some(now + s),
+        _ => at,
+    }
+}
+
 /// Arm the earliest of a runtime edge and the schedule edge.
 fn arm_merged(runtime: Option<Edge>, ctx: &ScheduleCtx, fx: &mut Vec<Effect>) {
     let pick = match (runtime, ctx.next_edge) {
@@ -458,8 +613,22 @@ mod tests {
             ladder: LADDER,
             snooze_secs: 600,
             checkin_after_secs: None,
+            // Sampling off unless a test opts in, mirroring the rules default.
+            sample_secs: None,
+            off_task_secs: 300,
+            foreground_on_task: true,
             presence: Presence::Unknown,
             mode: Mode::OffTask,
+        }
+    }
+
+    /// A `Started` with sampling disabled — the shape every pre-Phase-3 test means
+    /// when it says "started".
+    fn started(checkin_at: Option<UnixTime>) -> State {
+        State::Started {
+            checkin_at,
+            sample_at: None,
+            off_task_since: None,
         }
     }
 
@@ -567,14 +736,14 @@ mod tests {
         assert_eq!(s2.task_id(), Some(7));
         // Non-prompt states expose no task id.
         assert_eq!(State::Idle.task_id(), None);
-        assert_eq!(State::Started { checkin_at: None }.task_id(), None);
+        assert_eq!(started(None).task_id(), None);
     }
 
     #[test]
     fn ack_starts_task_logs_outcome_no_checkin() {
         let st = State::Prompting { shown_at: 1000, snooze_until: None, mode: Mode::OffTask, task_id: None };
         let (s, fx) = next(st, &Event::Ack(1200), &ctx(true, window_end(5000)));
-        assert_eq!(s, State::Started { checkin_at: None });
+        assert_eq!(s, started(None));
         assert!(fx.contains(&Effect::HidePrompt));
         assert!(fx.contains(&Effect::LogOutcome { outcome: Outcome::Started, at: 1200 }));
         assert_eq!(armed(&fx), Some((5000, EdgeKind::WindowEnd)));
@@ -586,7 +755,7 @@ mod tests {
         c.checkin_after_secs = Some(1800);
         let st = State::Prompting { shown_at: 1000, snooze_until: None, mode: Mode::OffTask, task_id: None };
         let (s, fx) = next(st, &Event::Ack(1200), &c);
-        assert_eq!(s, State::Started { checkin_at: Some(3000) });
+        assert_eq!(s, started(Some(3000)));
         assert_eq!(armed(&fx), Some((3000, EdgeKind::CheckIn)));
     }
 
@@ -594,12 +763,12 @@ mod tests {
     fn checkin_fires_then_ack_returns_to_started() {
         let mut c = ctx(true, window_end(9999));
         c.checkin_after_secs = Some(1800);
-        let started = State::Started { checkin_at: Some(3000) };
-        let (s, fx) = next(started, &Event::EdgeTimer(3000), &c);
+        let st = started(Some(3000));
+        let (s, fx) = next(st, &Event::EdgeTimer(3000), &c);
         assert!(matches!(s, State::CheckIn { shown_at: 3000 }));
         assert!(fx.iter().any(|e| matches!(e, Effect::ShowPrompt { .. })));
         let (s2, fx2) = next(s, &Event::Ack(3100), &c);
-        assert_eq!(s2, State::Started { checkin_at: None });
+        assert_eq!(s2, started(None));
         assert!(fx2.contains(&Effect::LogOutcome { outcome: Outcome::CheckedIn, at: 3100 }));
     }
 
@@ -608,10 +777,10 @@ mod tests {
         let mut c = ctx(true, window_end(9999));
         c.checkin_after_secs = Some(1800);
         c.presence = Presence::Active;
-        let started = State::Started { checkin_at: Some(3000) };
-        let (s, fx) = next(started, &Event::EdgeTimer(3000), &c);
+        let st = started(Some(3000));
+        let (s, fx) = next(st, &Event::EdgeTimer(3000), &c);
         // No prompt: the user is obviously working, so we back off to Started.
-        assert_eq!(s, State::Started { checkin_at: None });
+        assert_eq!(s, started(None));
         assert!(!fx.iter().any(|e| matches!(e, Effect::ShowPrompt { .. })));
         assert!(fx.contains(&Effect::LogOutcome { outcome: Outcome::AutoCheckedIn, at: 3000 }));
         assert_eq!(armed(&fx), Some((9999, EdgeKind::WindowEnd)));
@@ -623,8 +792,8 @@ mod tests {
             let mut c = ctx(true, window_end(9999));
             c.checkin_after_secs = Some(1800);
             c.presence = p;
-            let started = State::Started { checkin_at: Some(3000) };
-            let (s, fx) = next(started, &Event::EdgeTimer(3000), &c);
+            let st = started(Some(3000));
+            let (s, fx) = next(st, &Event::EdgeTimer(3000), &c);
             assert!(matches!(s, State::CheckIn { shown_at: 3000 }), "presence {p:?}");
             assert!(fx.iter().any(|e| matches!(e, Effect::ShowPrompt { .. })), "presence {p:?}");
         }
@@ -653,11 +822,11 @@ mod tests {
     fn skip_dismisses_window_for_good() {
         let st = State::Prompting { shown_at: 1000, snooze_until: None, mode: Mode::OffTask, task_id: None };
         let (s, fx) = next(st, &Event::Skip(1200), &ctx(true, window_end(5000)));
-        assert_eq!(s, State::Started { checkin_at: None });
+        assert_eq!(s, started(None));
         assert!(fx.contains(&Effect::LogOutcome { outcome: Outcome::Skipped, at: 1200 }));
         // A later timer in-window stays Started — no re-prompt.
         let (s2, fx2) = next(s, &Event::EdgeTimer(2000), &ctx(true, window_end(5000)));
-        assert_eq!(s2, State::Started { checkin_at: None });
+        assert_eq!(s2, started(None));
         assert!(!fx2.iter().any(|e| matches!(e, Effect::ShowPrompt { .. })));
     }
 
@@ -665,7 +834,7 @@ mod tests {
     fn window_close_collapses_to_idle_from_any_state() {
         for st in [
             State::Prompting { shown_at: 1000, snooze_until: None, mode: Mode::OffTask, task_id: None },
-            State::Started { checkin_at: Some(4000) },
+            started(Some(4000)),
             State::CheckIn { shown_at: 3000 },
         ] {
             let (s, fx) = next(
@@ -690,6 +859,276 @@ mod tests {
         assert_eq!(s, State::Idle);
         assert!(!fx.iter().any(|e| matches!(e, Effect::HidePrompt | Effect::ShowPrompt { .. })));
         assert_eq!(fx, vec![Effect::ArmEdgeTimer { at: 90_000, kind: EdgeKind::TaskStart }]);
+    }
+
+    // --- §6.1 STARTED sampling spine ---
+
+    /// Context with sampling live: 5-min cadence, 5-min off-task threshold.
+    fn sampling_ctx(edge: Option<Edge>) -> ScheduleCtx {
+        let mut c = ctx(true, edge);
+        c.sample_secs = Some(300);
+        c.off_task_secs = 300;
+        c
+    }
+
+    fn prompting() -> State {
+        State::Prompting {
+            shown_at: 1000,
+            snooze_until: None,
+            mode: Mode::OffTask,
+            task_id: None,
+        }
+    }
+
+    // Ack spins the spine up: Started carries a sample edge one cadence out, and
+    // the timer arms it because it beats the far-off window end.
+    #[test]
+    fn ack_arms_sample_edge_when_sampling_enabled() {
+        let (s, fx) = next(prompting(), &Event::Ack(1200), &sampling_ctx(window_end(9999)));
+        assert_eq!(
+            s,
+            State::Started {
+                checkin_at: None,
+                sample_at: Some(1500),
+                off_task_since: None
+            }
+        );
+        assert_eq!(armed(&fx), Some((1500, EdgeKind::Sample)));
+    }
+
+    // The two Started runtime edges collapse to their earliest before meeting the
+    // schedule edge — one armed timer, never two.
+    #[test]
+    fn started_arms_earliest_of_checkin_sample_and_schedule() {
+        let mut c = sampling_ctx(window_end(9999));
+        c.checkin_after_secs = Some(120); // check-in at 1320 beats sample at 1500
+        let (_, fx) = next(prompting(), &Event::Ack(1200), &c);
+        assert_eq!(armed(&fx), Some((1320, EdgeKind::CheckIn)));
+
+        // Sample sooner than the check-in → sample wins.
+        c.checkin_after_secs = Some(3600);
+        let (_, fx) = next(prompting(), &Event::Ack(1200), &c);
+        assert_eq!(armed(&fx), Some((1500, EdgeKind::Sample)));
+
+        // Window closing before either runtime edge → the schedule edge wins.
+        let mut c2 = sampling_ctx(window_end(1400));
+        c2.checkin_after_secs = Some(3600);
+        let (_, fx) = next(prompting(), &Event::Ack(1200), &c2);
+        assert_eq!(armed(&fx), Some((1400, EdgeKind::WindowEnd)));
+
+        // Exactly one timer is armed on every one of those transitions.
+        assert_eq!(
+            fx.iter().filter(|e| matches!(e, Effect::ArmEdgeTimer { .. })).count(),
+            1
+        );
+    }
+
+    // An on-task sample is silent: re-arm one cadence out, stay Started, no prompt.
+    #[test]
+    fn on_task_sample_rearms_and_stays_quiet() {
+        let c = sampling_ctx(window_end(9999)); // foreground_on_task defaults true
+        let st = State::Started {
+            checkin_at: None,
+            sample_at: Some(1500),
+            off_task_since: None,
+        };
+        let (s, fx) = next(st, &Event::EdgeTimer(1500), &c);
+        assert_eq!(
+            s,
+            State::Started {
+                checkin_at: None,
+                sample_at: Some(1800),
+                off_task_since: None
+            }
+        );
+        assert!(!fx.iter().any(|e| matches!(e, Effect::ShowPrompt { .. })));
+        assert_eq!(armed(&fx), Some((1800, EdgeKind::Sample)));
+    }
+
+    // A continuous off-task run: the first sample opens the run, later samples
+    // carry it, and crossing off_task_secs raises the drift check-in.
+    #[test]
+    fn off_task_run_crosses_threshold_and_raises_checkin() {
+        let mut c = sampling_ctx(window_end(9999));
+        c.foreground_on_task = false;
+        let st = State::Started {
+            checkin_at: None,
+            sample_at: Some(1500),
+            off_task_since: None,
+        };
+
+        // First off-task sample: run opens at 1500, still under threshold.
+        let (s, fx) = next(st, &Event::EdgeTimer(1500), &c);
+        assert_eq!(
+            s,
+            State::Started {
+                checkin_at: None,
+                sample_at: Some(1800),
+                off_task_since: Some(1500)
+            }
+        );
+        assert!(!fx.iter().any(|e| matches!(e, Effect::ShowPrompt { .. })));
+
+        // Second sample at 1800: the run is exactly 300s → threshold crossed.
+        let (s2, fx2) = next(s, &Event::EdgeTimer(1800), &c);
+        assert!(matches!(s2, State::CheckIn { shown_at: 1800 }));
+        assert!(fx2.iter().any(|e| matches!(e, Effect::ShowPrompt { .. })));
+        assert!(fx2.contains(&Effect::LogEdge {
+            entered: "checkin",
+            at: 1800,
+            mode: Some(Mode::OffTask)
+        }));
+        // A showing check-in owns the screen: no sample edge competes with it.
+        assert_eq!(armed(&fx2), Some((9999, EdgeKind::WindowEnd)));
+    }
+
+    // Returning to a tool resets the run — the threshold measures *continuous*
+    // drift, so an off-task blip never accumulates toward a check-in.
+    #[test]
+    fn returning_on_task_resets_the_off_task_run() {
+        let mut c = sampling_ctx(window_end(9999));
+        c.foreground_on_task = false;
+        let st = State::Started {
+            checkin_at: None,
+            sample_at: Some(1500),
+            off_task_since: None,
+        };
+        let (s, _) = next(st, &Event::EdgeTimer(1500), &c);
+        assert!(matches!(s, State::Started { off_task_since: Some(1500), .. }));
+
+        // Back on-task at the next sample: run cleared.
+        c.foreground_on_task = true;
+        let (s2, _) = next(s, &Event::EdgeTimer(1800), &c);
+        assert!(matches!(s2, State::Started { off_task_since: None, .. }));
+
+        // Off-task again at 2100 opens a *fresh* run, so 2400 is only 300s in and
+        // the earlier blip contributes nothing.
+        c.foreground_on_task = false;
+        let (s3, _) = next(s2, &Event::EdgeTimer(2100), &c);
+        assert!(matches!(s3, State::Started { off_task_since: Some(2100), .. }));
+    }
+
+    // AW down (or any edge with no foreground probe) reads as on-task: the user is
+    // left alone rather than nagged on a signal we don't have.
+    #[test]
+    fn missing_foreground_signal_never_manufactures_drift() {
+        let c = sampling_ctx(window_end(9999)); // foreground_on_task: true default
+        let st = State::Started {
+            checkin_at: None,
+            sample_at: Some(1500),
+            off_task_since: Some(1000), // a run that would otherwise be long past due
+        };
+        let (s, fx) = next(st, &Event::EdgeTimer(1500), &c);
+        assert!(matches!(s, State::Started { off_task_since: None, .. }));
+        assert!(!fx.iter().any(|e| matches!(e, Effect::ShowPrompt { .. })));
+    }
+
+    // The zero-polling guarantee (PLAN §7): no state outside Started-with-sampling
+    // can arm a Sample edge, because none of them carries a sample_at to arm.
+    #[test]
+    fn no_sample_edge_outside_started() {
+        let c = sampling_ctx(window_end(9999));
+        let armed_kind = |fx: &[Effect]| armed(fx).map(|(_, k)| k);
+
+        // Idle out of window.
+        let out = ctx(false, Some(Edge { at: 90_000, kind: EdgeKind::TaskStart }));
+        let (_, fx) = next(State::Idle, &Event::EdgeTimer(5000), &out);
+        assert_ne!(armed_kind(&fx), Some(EdgeKind::Sample));
+
+        // Prompting (window open, task not started yet).
+        let (s, fx) = next(State::Idle, &Event::EdgeTimer(1000), &c);
+        assert!(matches!(s, State::Prompting { .. }));
+        assert_ne!(armed_kind(&fx), Some(EdgeKind::Sample));
+
+        // A showing check-in.
+        let (_, fx) = next(State::CheckIn { shown_at: 3000 }, &Event::EdgeTimer(3100), &c);
+        assert_ne!(armed_kind(&fx), Some(EdgeKind::Sample));
+
+        // Sampling disabled by config: Started itself carries no sample edge.
+        let (s, fx) = next(prompting(), &Event::Ack(1200), &ctx(true, window_end(9999)));
+        assert!(matches!(s, State::Started { sample_at: None, .. }));
+        assert_ne!(armed_kind(&fx), Some(EdgeKind::Sample));
+
+        // Window closing collapses a sampling Started to Idle — the edge is gone,
+        // not merely skipped.
+        let live = State::Started {
+            checkin_at: None,
+            sample_at: Some(1500),
+            off_task_since: None,
+        };
+        let (s, fx) = next(live, &Event::EdgeTimer(5000), &out);
+        assert_eq!(s, State::Idle);
+        assert_eq!(armed(&fx), Some((90_000, EdgeKind::TaskStart)));
+    }
+
+    // Skip means "not doing this": no check-in and no sampling either.
+    #[test]
+    fn skip_starts_no_sampling() {
+        let (s, fx) = next(prompting(), &Event::Skip(1200), &sampling_ctx(window_end(5000)));
+        assert_eq!(s, started(None));
+        assert_eq!(armed(&fx), Some((5000, EdgeKind::WindowEnd)));
+    }
+
+    // An auto-resolved check-in leaves the spine running, and advances a sample
+    // edge that came due on the same wake instead of re-arming it in the past.
+    #[test]
+    fn auto_checkin_keeps_sampling_alive() {
+        let mut c = sampling_ctx(window_end(9999));
+        c.presence = Presence::Active;
+        let st = State::Started {
+            checkin_at: Some(3000),
+            sample_at: Some(3000), // due on this same wake
+            off_task_since: None,
+        };
+        let (s, fx) = next(st, &Event::EdgeTimer(3000), &c);
+        assert_eq!(
+            s,
+            State::Started {
+                checkin_at: None,
+                sample_at: Some(3300), // bumped, not left at 3000
+                off_task_since: None
+            }
+        );
+        assert!(fx.contains(&Effect::LogOutcome { outcome: Outcome::AutoCheckedIn, at: 3000 }));
+        assert_eq!(armed(&fx), Some((3300, EdgeKind::Sample)));
+    }
+
+    // Answering the drift check-in: Ack resumes sampling with a clean run; Skip
+    // stops it.
+    #[test]
+    fn checkin_answer_resumes_or_stops_sampling() {
+        let c = sampling_ctx(window_end(9999));
+        let (s, fx) = next(State::CheckIn { shown_at: 1800 }, &Event::Ack(1900), &c);
+        assert_eq!(
+            s,
+            State::Started {
+                checkin_at: None,
+                sample_at: Some(2200),
+                off_task_since: None
+            }
+        );
+        assert_eq!(armed(&fx), Some((2200, EdgeKind::Sample)));
+        assert!(fx.contains(&Effect::LogOutcome { outcome: Outcome::CheckedIn, at: 1900 }));
+
+        let (s2, fx2) = next(State::CheckIn { shown_at: 1800 }, &Event::Skip(1900), &c);
+        assert_eq!(s2, started(None));
+        assert_eq!(armed(&fx2), Some((9999, EdgeKind::WindowEnd)));
+        assert!(fx2.contains(&Effect::LogOutcome { outcome: Outcome::Skipped, at: 1900 }));
+    }
+
+    // A wake with nothing due re-arms both edges untouched (no drift in the run,
+    // no premature sample).
+    #[test]
+    fn started_wake_with_nothing_due_rearms_unchanged() {
+        let c = sampling_ctx(window_end(9999));
+        let st = State::Started {
+            checkin_at: Some(4000),
+            sample_at: Some(1500),
+            off_task_since: Some(1400),
+        };
+        let (s, fx) = next(st, &Event::EdgeTimer(1200), &c);
+        assert_eq!(s, st);
+        assert_eq!(armed(&fx), Some((1500, EdgeKind::Sample)));
     }
 
     #[test]

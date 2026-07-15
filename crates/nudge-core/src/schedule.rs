@@ -177,10 +177,16 @@ pub fn context_with_tasks(rules: &Rules, tasks: &[Task], now: LocalNow) -> Sched
         ladder: rules.escalation.ladder(),
         snooze_secs: rules.escalation.snooze_secs,
         checkin_after_secs: rules.escalation.checkin(),
+        sample_secs: rules.escalation.sample(),
+        off_task_secs: rules.escalation.off_task_secs,
         // Schedule knows nothing of live activity; the svc overrides these at the
-        // relevant edge after probing AW (presence at check-in, mode at task-start).
+        // relevant edge after probing AW (presence at check-in, mode at task-start,
+        // foreground app at a sample edge). `foreground_on_task` defaults to true so
+        // a missing probe — AW down, or any non-sample edge — never manufactures an
+        // off-task run (PLAN §7: AW down → treat as on-task, don't escalate).
         presence: Presence::Unknown,
         mode: Mode::OffTask,
+        foreground_on_task: true,
     }
 }
 

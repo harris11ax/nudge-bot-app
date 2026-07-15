@@ -27,8 +27,17 @@ Last completed: session 41 — 10e Gmail/GCal connectors: `gmail.rs` (gmail.read
   - Progress (PLAN-step1.md phases): **P1 ✅** `task_window.rs` pure `display_list` (§6.8/§6.9), 59 core tests.
     **P2 ✅ (2026-07-14)** data-model + additive migration: `tasks.estimate_minutes`/`logged_minutes`,
     `task_tools`/`app_classes`/`app_usage` tables, `set_logged_minutes` (sole svc write), `task_tools()`/
-    `app_class()` readers, `PRAGMA user_version = 2`; svc persist tests green. **P3** STARTED sampling edge +
-    lazy logged_minutes, **P4** OFF-task check-in + Pause — remaining. Not committed.
+    `app_class()` readers, `PRAGMA user_version = 2`; svc persist tests green.
+    **P3 ✅ (2026-07-15)** STARTED sampling edge + lazy logged_minutes: `EdgeKind::Sample`; `Started` gains
+    `sample_at`/`off_task_since`; `arm_started` collapses the two runtime edges (check-in, sample) to their
+    earliest before the schedule merge, so the single-armed-timer invariant holds. Sampling is opt-in
+    (`[escalation] sample_secs = 0` default, `off_task_secs = 300`); a continuous off-task run ≥ threshold
+    raises the drift check-in, returning on-task resets it. svc: `sample_due` gate + `foreground_on_task`
+    (task_tools → productive_apps fallback; `ignore` kind, AW-down, and nothing-configured all read on-task)
+    + one-cadence `logged_minutes` accrual at the edge. 106 workspace tests green. Not committed.
+    **P4** OFF-task check-in Yes/No + task list + Take-a-break + Pause (§6.5/§6.6) — remaining. Note P4 will
+    need `CheckIn { kind }` (PLAN §2): P3 routes the drift check-in through the existing kindless `CheckIn`,
+    where Ack resumes sampling and Skip stops it — the interactive Yes/No + `ShowTaskList` split is P4's.
 
 ## Session model: Sonnet (default) | Opus gate on planning/complex design | Haiku for trivial tasks
 - Read NEXTSTEPS.md at start. Scan for incomplete steps:

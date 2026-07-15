@@ -32,7 +32,16 @@ fn example_rules_full_day_cycle() {
 
     // User starts the task — prompt hidden, outcome logged, task Started.
     let (s, fx) = next(s, &Event::Ack(60), &ctx);
-    assert_eq!(s, State::Started { checkin_at: None });
+    // Sampling and check-ins are both off in rules.example.toml, so Started
+    // carries no runtime edges at all.
+    assert_eq!(
+        s,
+        State::Started {
+            checkin_at: None,
+            sample_at: None,
+            off_task_since: None
+        }
+    );
     assert!(fx.contains(&Effect::HidePrompt));
 
     // 12:00 edge — window closes, back to idle.
