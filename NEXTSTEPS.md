@@ -3,8 +3,8 @@
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below
      for branch/commit/PR conventions now that this is a real remote, not just a local tree. -->
 
-Last completed: session 43 — Step 1 / PLAN-step1 **Phase 4** (the last phase of the Step-1 slice):
-OFF-task check-in Yes/No + §6.5 task list + Take-a-break + tray Pause. Full history: [HISTORY.md](HISTORY.md).
+Last completed: session 49 — Step 3 / PLAN-step3 **P2** (classification screen, core + svc).
+Next: P3 (nudge-app Tools selector + Settings tabs). Full history: [HISTORY.md](HISTORY.md).
 
 ## Next steps
 - [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
@@ -140,8 +140,13 @@ OFF-task check-in Yes/No + §6.5 task list + Take-a-break + tray Pause. Full his
     configs, silent unless drifted). svc: `ontask_due` gate, `any_task_on_task()` union compare,
     `seen_tools` accumulator (fills at probes, clears on check-in resolution — P2 consumes),
     `Buttons::TaskList` rendered via Yes/No/Break stub (real picker = P2). 133 tests green. Not committed.
-  - **P2** svc: classification screen — `Effect::ShowClassify`/`Event::Classify`, `classify.rs` overlay,
-    routes each accumulated tool → task tool-list / global not-tool / task-scoped ignore.
+  - **P2 ✅ (2026-07-16, session 49)** svc classification screen: `State::Classifying`,
+    `ShowClassify`/`HideClassify`, `Event::{PickTask,Classify,ClassifyDone}` + `ClassifyChoice`;
+    `classify.rs` overlay ([Tool][Not a tool][Ignore] per row, Done footer, auto-Done on last row);
+    OnTask picker = the task list (rows send `PickTask(task_id)`; §6.5 Choosing pick still resolves
+    like Start); OffTask Yes classifies only when tools accumulated + window has a task (else pre-P2
+    behaviour). Persistence via new svc writers `add_task_tool`/`set_app_class` at the main-loop seam.
+    143 tests green. Live drive deferred to P5. Not committed.
   - **P3** nudge-app: §6.2 searchable chip selector + Settings Tools/Style tabs (DB model already exists).
   - **P4** carried: Tier-C row-click task switch (state.rs:531-560 ignores row `task_id`) + §6.6 tray Pause
     duration submenu.

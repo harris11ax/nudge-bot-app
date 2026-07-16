@@ -87,7 +87,7 @@ in live use. **This is the load-bearing choice — confirm before P2.**
 - **Deliverable:** core fires the on-task check-in; classification is still a no-op passthrough.
 - **Not committed** until user asks.
 
-### P2 — svc: classification screen (the biggest new piece)
+### P2 — svc: classification screen (the biggest new piece) — ✅ DONE session 49 (143 tests green; used `window_task_id` instead of a new `active_task_id` per B.2; task_id consumed at the svc persistence seam, not in `Event::Classify`; live drive folded into P5)
 - New `State`-adjacent flow: after a task is picked at a check-in (both §6.4 OnTask task-pick and
   §6.5 OffTask Yes), show the classification overlay listing each accumulated tool with three
   choices — **add to task tool list** / **global not-tool** / **task-scoped ignore**.

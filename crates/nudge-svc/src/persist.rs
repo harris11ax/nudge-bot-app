@@ -210,6 +210,32 @@ impl Db {
             .ok()
     }
 
+    /// Add one row to a task's tool list (Tier-B P2 classification: `kind` is
+    /// `"tool"` or `"ignore"`). Single-row `INSERT OR IGNORE` upsert — the
+    /// app's `set_task_tools` replaces whole lists; this incremental writer is
+    /// the classification screen's, and never disturbs existing rows.
+    pub fn add_task_tool(&self, task_id: i64, app_name: &str, kind: &str) {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO task_tools (task_id, app_name, kind)
+                 VALUES (?1, ?2, ?3)",
+                rusqlite::params![task_id, app_name, kind],
+            )
+            .expect("add task_tool");
+    }
+
+    /// Set an app's global class (Tier-B P2: the classification screen's
+    /// `not_tool` route). Upsert by primary key.
+    pub fn set_app_class(&self, app_name: &str, class: &str) {
+        self.conn
+            .execute(
+                "INSERT INTO app_classes (app_name, class) VALUES (?1, ?2)
+                 ON CONFLICT(app_name) DO UPDATE SET class = excluded.class",
+                rusqlite::params![app_name, class],
+            )
+            .expect("set app_class");
+    }
+
     /// The **one** sanctioned svc write into `tasks` (§3, budget callout): update
     /// a single row's `logged_minutes` cache by rowid at a sample/check-in/ack
     /// edge. Keyed by rowid, one UPDATE, no schema churn. Every other `tasks`
@@ -328,6 +354,33 @@ mod tests {
 
         // Unknown id affects nothing.
         assert_eq!(db.set_logged_minutes(9999, 10), 0);
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // The classification writers: add_task_tool upserts single rows without
+    // disturbing the list; set_app_class upserts by app name.
+    #[test]
+    fn classification_writers_upsert() {
+        let path = temp_db("classify");
+        let db = Db::open(path.clone());
+
+        db.add_task_tool(1, "code.exe", "tool");
+        db.add_task_tool(1, "slack.exe", "ignore");
+        db.add_task_tool(1, "code.exe", "tool"); // duplicate → ignored
+        assert_eq!(
+            db.task_tools(1),
+            vec![
+                ("code.exe".to_string(), "tool".to_string()),
+                ("slack.exe".to_string(), "ignore".to_string()),
+            ]
+        );
+
+        db.set_app_class("game.exe", "not_tool");
+        assert_eq!(db.app_class("game.exe").as_deref(), Some("not_tool"));
+        db.set_app_class("game.exe", "normal"); // overwrite, not a second row
+        assert_eq!(db.app_class("game.exe").as_deref(), Some("normal"));
 
         drop(db);
         let _ = std::fs::remove_file(&path);

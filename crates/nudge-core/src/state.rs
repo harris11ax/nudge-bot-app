@@ -94,6 +94,14 @@ pub enum State {
     /// [`State::Paused`]; distinct only so the outcomes log can tell a break the
     /// user chose from a pause they reached for.
     Break { resume_at: UnixTime },
+    /// The Tier-B P2 classification screen is up: each tool seen since the last
+    /// check-in is being routed to `task_id`'s tool list / the global not-tool
+    /// list / a task-scoped ignore. Check-in-family: an ignored screen dies at
+    /// the next schedule edge like an ignored [`State::Choosing`]. Core never
+    /// holds the tool list — the svc snapshotted it into the `ShowClassify`
+    /// effect and persists each choice itself; core only waits for
+    /// [`Event::ClassifyDone`].
+    Classifying { task_id: i64, shown_at: UnixTime },
 }
 
 impl State {
@@ -107,6 +115,7 @@ impl State {
             State::Choosing { .. } => "choosing",
             State::Paused { .. } => "paused",
             State::Break { .. } => "break",
+            State::Classifying { .. } => "classifying",
         }
     }
 
@@ -186,6 +195,25 @@ pub enum Event {
     BreakFor(UnixTime, i64),
     /// End a pause/break early (tray Resume).
     Resume(UnixTime),
+    /// A §6.4 picker (or, come Tier-C, the §6.5 list) row was clicked, carrying
+    /// that row's `tasks` rowid — unlike `Ack`, the picked task matters, because
+    /// classification routes tools to *its* lists.
+    PickTask(UnixTime, i64),
+    /// One tool's routing choice at the classification screen. Core stays in
+    /// `Classifying` on each of these — the persistence is an svc side effect —
+    /// and leaves on [`Event::ClassifyDone`].
+    Classify { at: UnixTime, app_name: String, choice: ClassifyChoice },
+    /// The classification screen finished (every row routed, or dismissed).
+    ClassifyDone(UnixTime),
+}
+
+/// Where a classified tool goes (Tier-B P2): the task's tool list, the global
+/// not-tool list, or a task-scoped ignore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassifyChoice {
+    Tool,
+    NotTool,
+    Ignore,
 }
 
 impl Event {
@@ -201,7 +229,10 @@ impl Event {
             | Event::CheckInNo(t)
             | Event::PauseFor(t, _)
             | Event::BreakFor(t, _)
-            | Event::Resume(t) => *t,
+            | Event::Resume(t)
+            | Event::PickTask(t, _)
+            | Event::Classify { at: t, .. }
+            | Event::ClassifyDone(t) => *t,
         }
     }
 }
@@ -240,6 +271,13 @@ pub enum Effect {
     ShowTaskList { rows: Vec<Row> },
     /// Tear down the task list window.
     HideTaskList,
+    /// Show the Tier-B P2 classification screen for `tools` (the svc's
+    /// since-last-check-in accumulator, snapshotted into `ctx.classify_tools`),
+    /// routing each to `task_id`'s lists. Core copies; the svc renders and
+    /// persists.
+    ShowClassify { tools: Vec<String>, task_id: i64 },
+    /// Tear down the classification screen.
+    HideClassify,
     /// Play the escalation alert sound (L2 re-alert).
     PlaySound,
     /// Arm the single waitable timer for the next edge (absolute time + kind).
@@ -302,6 +340,12 @@ pub struct ScheduleCtx {
     /// §6.4 on-task check-in floor cadence in seconds; `None` disables it (no
     /// `ontask_at` is ever armed). From `[escalation] ontask_checkin_secs`.
     pub ontask_secs: Option<i64>,
+    /// Tools seen since the last check-in (the svc's accumulator, PLAN-step3 §1
+    /// option A), snapshotted here only while a check-in that can enter
+    /// classification is on screen; empty everywhere else. Empty at the moment
+    /// of resolution ⇒ nothing to classify ⇒ the check-in resolves straight to
+    /// `Started` as it did pre-P2.
+    pub classify_tools: Vec<String>,
     /// Activity signal the svc probed from AW at a check-in edge (`Unknown`
     /// everywhere else). `Active` auto-resolves the check-in instead of nagging.
     pub presence: Presence,
@@ -576,19 +620,43 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
             )
         }
 
+        // Affirming a check-in with tools accumulated since the last one routes
+        // through the classification screen (Tier-B P2) instead of straight to
+        // Started: §6.5 Yes classifies against the open window's task, the §6.4
+        // picker against the picked row's. With nothing accumulated (or no task
+        // to route to) the guard fails and the plain resolution below applies,
+        // exactly as pre-P2. Periodic's Ack never lands here — no tool set.
+        (State::CheckIn { kind: CheckInKind::OffTask, .. }, Event::CheckInYes(_))
+            if !ctx.classify_tools.is_empty() && ctx.window_task_id.is_some() =>
+        {
+            let task_id = ctx.window_task_id.expect("guarded");
+            enter_classifying(state, task_id, now, ctx, fx)
+        }
+        (State::CheckIn { kind: CheckInKind::OnTask, .. }, Event::PickTask(_, id))
+            if !ctx.classify_tools.is_empty() =>
+        {
+            enter_classifying(state, *id, now, ctx, fx)
+        }
+
         // Yes ("still on it") returns to Started and resumes the sampling spine
         // with a fresh off-task run; Skip ("leave me alone") stops it, matching
         // Skip's dismiss-for-good meaning at the prompt. Ack is Yes under the
-        // periodic check-in's Start/Skip button set.
+        // periodic check-in's Start/Skip button set. A row pick with no tools to
+        // classify resolves the same way (the id becomes meaningful in Tier-C).
         (State::CheckIn { .. }, Event::Ack(_))
         | (State::CheckIn { .. }, Event::CheckInYes(_))
         | (State::CheckIn { .. }, Event::Skip(_))
+        | (State::CheckIn { .. }, Event::PickTask(_, _))
         // Picking a task off the §6.5 list (or dismissing it) resolves the same
         // way: the list is how we asked "so what *are* you doing?", and either
         // answer ends the question.
         | (State::Choosing { .. }, Event::Ack(_))
+        | (State::Choosing { .. }, Event::PickTask(_, _))
         | (State::Choosing { .. }, Event::Skip(_)) => {
-            let yes = matches!(event, Event::Ack(_) | Event::CheckInYes(_));
+            let yes = matches!(
+                event,
+                Event::Ack(_) | Event::CheckInYes(_) | Event::PickTask(_, _)
+            );
             let outcome = if yes { Outcome::CheckedIn } else { Outcome::Skipped };
             let sample_at = if yes { ctx.sample_secs.map(|s| now + s) } else { None };
             let ontask_at = if yes { ctx.ontask_secs.map(|s| now + s) } else { None };
@@ -620,10 +688,50 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
             (State::Choosing { shown_at: now }, fx)
         }
 
-        // Take-a-break, from either the check-in box or the list it opened.
+        // Take-a-break, from the check-in box, the list it opened, or the
+        // classification screen.
         (State::CheckIn { .. }, Event::BreakFor(_, secs))
-        | (State::Choosing { .. }, Event::BreakFor(_, secs)) => {
+        | (State::Choosing { .. }, Event::BreakFor(_, secs))
+        | (State::Classifying { .. }, Event::BreakFor(_, secs)) => {
             enter_quiet(state, now, now + secs, Quiet::Break)
+        }
+
+        // One tool routed at the classification screen. The persistence is an
+        // svc side effect at the event seam — core holds no tool list, so there
+        // is nothing to update here; just keep the screen up and stay armed.
+        (State::Classifying { .. }, Event::Classify { .. }) => {
+            arm_schedule(ctx, &mut fx);
+            (state, fx)
+        }
+
+        // Classification finished (all rows routed) or dismissed: the check-in
+        // it grew out of is answered, so land in Started with the sampling
+        // spine and the §6.4 tick freshly armed. The svc clears its accumulator
+        // on this resolution.
+        (State::Classifying { .. }, Event::ClassifyDone(_))
+        | (State::Classifying { .. }, Event::Skip(_)) => {
+            let sample_at = ctx.sample_secs.map(|s| now + s);
+            let ontask_at = ctx.ontask_secs.map(|s| now + s);
+            fx.push(Effect::HideClassify);
+            fx.push(Effect::LogEdge { entered: "started", at: now, mode: None });
+            fx.push(Effect::LogOutcome { outcome: Outcome::CheckedIn, at: now });
+            arm_started(None, sample_at, ontask_at, ctx, &mut fx);
+            (
+                State::Started {
+                    checkin_at: None,
+                    sample_at,
+                    off_task_since: None,
+                    ontask_at,
+                },
+                fx,
+            )
+        }
+
+        // Reload while classifying: re-emit so a restart keeps the screen up.
+        (State::Classifying { task_id, shown_at }, Event::RulesReloaded(_)) => {
+            fx.push(Effect::ShowClassify { tools: ctx.classify_tools.clone(), task_id });
+            arm_schedule(ctx, &mut fx);
+            (State::Classifying { task_id, shown_at }, fx)
         }
 
         // Reload while a check-in or its list is showing: re-emit so a restart
@@ -728,6 +836,25 @@ fn checkin_text(ctx: &ScheduleCtx) -> String {
     format!("still on: {}?", ctx.window_text)
 }
 
+/// Swap an affirmed check-in for the classification screen (Tier-B P2): tear
+/// down whatever the check-in had up, show the tool router for `task_id`, and
+/// log the family transition. The check-in's outcome is logged here (the user
+/// answered it); `ClassifyDone` later logs only the started edge.
+fn enter_classifying(
+    state: State,
+    task_id: i64,
+    now: UnixTime,
+    ctx: &ScheduleCtx,
+    mut fx: Vec<Effect>,
+) -> (State, Vec<Effect>) {
+    hide_visible(state, &mut fx);
+    fx.push(Effect::ShowClassify { tools: ctx.classify_tools.clone(), task_id });
+    fx.push(Effect::LogEdge { entered: "classifying", at: now, mode: None });
+    fx.push(Effect::LogOutcome { outcome: Outcome::CheckedIn, at: now });
+    arm_schedule(ctx, &mut fx);
+    (State::Classifying { task_id, shown_at: now }, fx)
+}
+
 /// Put a check-in on screen. Both kinds render as an attention-getting `OffTask`
 /// L0 prompt regardless of the window's own mode — a check-in is a discrete
 /// question, not a background cue — and differ only in what the user can answer.
@@ -742,6 +869,12 @@ fn show_checkin(kind: CheckInKind, ctx: &ScheduleCtx, fx: &mut Vec<Effect>) {
             CheckInKind::OnTask => Buttons::TaskList,
         },
     });
+    // The §6.4 picker IS the task list: rows arrive precomputed (the svc fills
+    // `task_rows` at a due on-task tick), and a row click sends `PickTask` with
+    // that row's id, which is what routes into classification.
+    if kind == CheckInKind::OnTask {
+        fx.push(Effect::ShowTaskList { rows: ctx.task_rows.clone() });
+    }
 }
 
 /// Tear down whatever `state` has on screen: the prompt strip always (dropping a
@@ -750,8 +883,14 @@ fn show_checkin(kind: CheckInKind, ctx: &ScheduleCtx, fx: &mut Vec<Effect>) {
 /// exiting transition to remember which windows it owns.
 fn hide_visible(state: State, fx: &mut Vec<Effect>) {
     fx.push(Effect::HidePrompt);
-    if matches!(state, State::Choosing { .. }) {
+    if matches!(
+        state,
+        State::Choosing { .. } | State::CheckIn { kind: CheckInKind::OnTask, .. }
+    ) {
         fx.push(Effect::HideTaskList);
+    }
+    if matches!(state, State::Classifying { .. }) {
+        fx.push(Effect::HideClassify);
     }
 }
 
@@ -809,7 +948,10 @@ fn enter_quiet(state: State, now: UnixTime, resume_at: UnixTime, q: Quiet) -> (S
 fn was_live(state: State) -> bool {
     matches!(
         state,
-        State::Started { .. } | State::CheckIn { .. } | State::Choosing { .. }
+        State::Started { .. }
+            | State::CheckIn { .. }
+            | State::Choosing { .. }
+            | State::Classifying { .. }
     )
 }
 
@@ -957,6 +1099,7 @@ mod tests {
             foreground_on_task: true,
             any_task_on_task: true,
             ontask_secs: None,
+            classify_tools: Vec::new(),
             presence: Presence::Unknown,
             mode: Mode::OffTask,
         }
@@ -1858,6 +2001,166 @@ mod tests {
         );
         assert_eq!(s2, State::Idle);
         assert!(fx2.contains(&Effect::HidePrompt));
+    }
+
+    // --- Tier-B P2: classification screen ---
+
+    /// A live check-in with tools accumulated and a task to route them to, as
+    /// the svc supplies when classification can be entered.
+    fn classify_ctx(edge: Option<Edge>) -> ScheduleCtx {
+        let mut c = listed_ctx(edge);
+        c.ontask_secs = Some(1800);
+        c.window_task_id = Some(1);
+        c.classify_tools = vec!["code.exe".into(), "game.exe".into()];
+        c
+    }
+
+    // The §6.4 picker is the task list: raising an OnTask check-in shows the
+    // rows alongside the prompt, and both come down when a row is picked.
+    #[test]
+    fn ontask_checkin_shows_the_picker_rows() {
+        let mut c = classify_ctx(window_end(99_999));
+        c.any_task_on_task = false;
+        let st = State::Started {
+            checkin_at: None,
+            sample_at: None,
+            off_task_since: None,
+            ontask_at: Some(3000),
+        };
+        let (s, fx) = next(st, &Event::EdgeTimer(3000), &c);
+        assert!(matches!(s, State::CheckIn { kind: CheckInKind::OnTask, .. }));
+        assert!(fx.contains(&Effect::ShowTaskList { rows: c.task_rows.clone() }));
+    }
+
+    // Picking a row at the §6.4 check-in enters classification for THAT task,
+    // tearing the picker down and carrying the accumulator snapshot.
+    #[test]
+    fn ontask_pick_enters_classification_for_the_picked_task() {
+        let c = classify_ctx(window_end(99_999));
+        let st = State::CheckIn { shown_at: 3000, kind: CheckInKind::OnTask };
+        let (s, fx) = next(st, &Event::PickTask(3100, 7), &c);
+        assert_eq!(s, State::Classifying { task_id: 7, shown_at: 3100 });
+        assert!(fx.contains(&Effect::HidePrompt));
+        assert!(fx.contains(&Effect::HideTaskList));
+        assert!(fx.contains(&Effect::ShowClassify {
+            tools: c.classify_tools.clone(),
+            task_id: 7
+        }));
+        assert!(fx.contains(&Effect::LogEdge { entered: "classifying", at: 3100, mode: None }));
+        assert!(fx.contains(&Effect::LogOutcome { outcome: Outcome::CheckedIn, at: 3100 }));
+    }
+
+    // Yes at a drift check-in with tools accumulated routes through
+    // classification against the open window's task — no longer straight to
+    // Started (regression guard on the changed arm).
+    #[test]
+    fn drift_yes_with_tools_enters_classification() {
+        let c = classify_ctx(window_end(9999));
+        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask };
+        let (s, fx) = next(st, &Event::CheckInYes(1900), &c);
+        assert_eq!(s, State::Classifying { task_id: 1, shown_at: 1900 });
+        assert!(fx.contains(&Effect::ShowClassify {
+            tools: c.classify_tools.clone(),
+            task_id: 1
+        }));
+    }
+
+    // With nothing accumulated (or no task), Yes resolves as it always did; the
+    // periodic check-in's Ack never classifies even with tools in hand.
+    #[test]
+    fn plain_resolution_when_nothing_to_classify() {
+        // Empty accumulator → straight to Started.
+        let mut c = classify_ctx(window_end(9999));
+        c.classify_tools = Vec::new();
+        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask };
+        let (s, _) = next(st, &Event::CheckInYes(1900), &c);
+        assert!(matches!(s, State::Started { .. }));
+
+        // No task to route to → same.
+        let mut c2 = classify_ctx(window_end(9999));
+        c2.window_task_id = None;
+        let (s2, _) = next(st, &Event::CheckInYes(1900), &c2);
+        assert!(matches!(s2, State::Started { .. }));
+
+        // Periodic Ack with tools in hand → still no classification.
+        let c3 = classify_ctx(window_end(9999));
+        let per = State::CheckIn { shown_at: 1800, kind: CheckInKind::Periodic };
+        let (s3, fx3) = next(per, &Event::Ack(1900), &c3);
+        assert!(matches!(s3, State::Started { .. }));
+        assert!(!fx3.iter().any(|e| matches!(e, Effect::ShowClassify { .. })));
+
+        // A row pick with no tools resolves like Start (Choosing keeps §6.5
+        // behaviour with the id now riding along).
+        let c4 = listed_ctx(window_end(9999));
+        let (s4, fx4) = next(State::Choosing { shown_at: 1900 }, &Event::PickTask(2000, 2), &c4);
+        assert!(matches!(s4, State::Started { .. }));
+        assert!(fx4.contains(&Effect::HideTaskList));
+        assert!(fx4.contains(&Effect::LogOutcome { outcome: Outcome::CheckedIn, at: 2000 }));
+    }
+
+    // Each routed tool keeps the screen up (persistence is the svc's); Done
+    // lands in Started with the sampling spine and §6.4 tick freshly armed.
+    #[test]
+    fn classifying_stays_until_done_then_restarts_the_spine() {
+        let c = classify_ctx(window_end(99_999));
+        let st = State::Classifying { task_id: 7, shown_at: 3100 };
+        let (s, fx) = next(
+            st,
+            &Event::Classify {
+                at: 3150,
+                app_name: "code.exe".into(),
+                choice: ClassifyChoice::Tool,
+            },
+            &c,
+        );
+        assert_eq!(s, st);
+        assert!(!fx.iter().any(|e| matches!(e, Effect::HideClassify)));
+
+        let (s2, fx2) = next(st, &Event::ClassifyDone(3200), &c);
+        assert_eq!(
+            s2,
+            State::Started {
+                checkin_at: None,
+                sample_at: Some(3500),
+                off_task_since: None,
+                ontask_at: Some(5000),
+            }
+        );
+        assert!(fx2.contains(&Effect::HideClassify));
+        assert!(fx2.contains(&Effect::LogEdge { entered: "started", at: 3200, mode: None }));
+        assert!(fx2.contains(&Effect::LogOutcome { outcome: Outcome::CheckedIn, at: 3200 }));
+    }
+
+    // An ignored classification screen dies at the schedule edge like an
+    // ignored list, taking its window with it; a break silences it the same way.
+    #[test]
+    fn ignored_classifying_dies_and_break_silences_it() {
+        let out = ctx(false, Some(Edge { at: 90_000, kind: EdgeKind::TaskStart }));
+        let st = State::Classifying { task_id: 7, shown_at: 3100 };
+        let (s, fx) = next(st, &Event::EdgeTimer(5000), &out);
+        assert_eq!(s, State::Idle);
+        assert!(fx.contains(&Effect::HideClassify));
+
+        let c = classify_ctx(window_end(99_999));
+        let (s2, fx2) = next(st, &Event::BreakFor(3200, 600), &c);
+        assert_eq!(s2, State::Break { resume_at: 3800 });
+        assert!(fx2.contains(&Effect::HideClassify));
+        // A break from classifying was a live task; it resumes to Started.
+        let (s3, _) = next(s2, &Event::EdgeTimer(3800), &c);
+        assert!(matches!(s3, State::Started { .. }));
+    }
+
+    // Reload re-emits the screen so a restart keeps it up.
+    #[test]
+    fn reload_reemits_the_classify_screen() {
+        let c = classify_ctx(window_end(99_999));
+        let st = State::Classifying { task_id: 7, shown_at: 3100 };
+        let (s, fx) = next(st, &Event::RulesReloaded(3300), &c);
+        assert_eq!(s, st);
+        assert!(fx.contains(&Effect::ShowClassify {
+            tools: c.classify_tools.clone(),
+            task_id: 7
+        }));
     }
 
     // The zero-polling guarantee extends to the quiet states: a paused or

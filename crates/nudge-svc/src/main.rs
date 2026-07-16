@@ -3,6 +3,7 @@
 //! No async runtime, no thread pool, no background tick.
 
 mod aw_query;
+mod classify;
 mod draft;
 mod hotkey;
 mod launch;
@@ -175,6 +176,12 @@ fn run_effects(effects: Vec<Effect>, now: i64, res: &mut Resources) {
                 res.tasklist = Some(tasklist::TaskList::create(&rows, now))
             }
             Effect::HideTaskList => drop(res.tasklist.take()),
+            // Tools arrive snapshotted from the svc's own accumulator; task_id
+            // is consumed at the Event::Classify persistence seam, not here.
+            Effect::ShowClassify { tools, task_id: _ } => {
+                res.classify = Some(classify::Classify::create(&tools))
+            }
+            Effect::HideClassify => drop(res.classify.take()),
             Effect::PlaySound => sound::alert(),
             Effect::ArmEdgeTimer { at, kind: _ } => res.edge_timer.arm_absolute(at),
             Effect::LogEdge { entered, at, mode } => {
@@ -189,6 +196,8 @@ struct Resources {
     overlay: Option<overlay::Anchor>,
     /// The §6.5 task list, up only between a check-in's No and its resolution.
     tasklist: Option<tasklist::TaskList>,
+    /// The Tier-B P2 classification screen, up only while `State::Classifying`.
+    classify: Option<classify::Classify>,
     /// Strip geometry from `[anchor]`; refreshed on every rules load so a live
     /// reload re-sizes/re-docks the next prompt.
     geom: overlay::AnchorGeom,
@@ -227,6 +236,7 @@ fn main() {
     let mut res = Resources {
         overlay: None,
         tasklist: None,
+        classify: None,
         geom: overlay::AnchorGeom::from_rules(&rules.anchor),
         edge_timer: timers::EdgeTimer::new(),
         db: persist::Db::open(dirs_config().join("sessions.db")),
@@ -375,6 +385,11 @@ fn main() {
             }
             let rows = display_list(&tasks, &progress_map(&tasks), now.unix, &WindowCfg::default());
             ctx.any_task_on_task = any_task_on_task(&res.db, &rules, &rows, app.as_deref());
+            // If the tick raises the §6.4 check-in, its picker IS the task list
+            // (`show_checkin` emits `ShowTaskList` for `OnTask`) — hand it the
+            // rows now, while they're in hand; state is still `Started` here so
+            // the `task_list_due` fill below can't cover this edge.
+            ctx.task_rows = rows;
         }
         // §6.5 list: computed here, by `task_window::display_list`, so that core
         // can hand it straight to the render on a No without either end selecting,
@@ -382,12 +397,47 @@ fn main() {
         if task_list_due(state) {
             ctx.task_rows = display_list(&tasks, &progress_map(&tasks), now.unix, &WindowCfg::default());
         }
-        let was_asking = matches!(state, State::CheckIn { .. } | State::Choosing { .. });
+        // Classification (Tier-B P2): a check-in that can enter the classify
+        // screen — or the screen itself, on a reload re-emit — sees the
+        // accumulator snapshot; everywhere else it stays empty so the common
+        // transition pays nothing.
+        if matches!(
+            state,
+            State::CheckIn { kind: CheckInKind::OffTask | CheckInKind::OnTask, .. }
+                | State::Classifying { .. }
+        ) {
+            ctx.classify_tools = seen_tools.iter().cloned().collect();
+        }
+        // Persist a routed tool (the svc is the writer; core only acknowledges).
+        // Tool/Ignore go to the classifying task's list; NotTool is global.
+        if let (State::Classifying { task_id, .. }, Event::Classify { app_name, choice, .. }) =
+            (state, &event)
+        {
+            match choice {
+                nudge_core::state::ClassifyChoice::Tool => {
+                    res.db.add_task_tool(task_id, app_name, "tool")
+                }
+                nudge_core::state::ClassifyChoice::Ignore => {
+                    res.db.add_task_tool(task_id, app_name, "ignore")
+                }
+                nudge_core::state::ClassifyChoice::NotTool => {
+                    res.db.set_app_class(app_name, "not_tool")
+                }
+            }
+        }
+        let asking = |s: State| {
+            matches!(
+                s,
+                State::CheckIn { .. } | State::Choosing { .. } | State::Classifying { .. }
+            )
+        };
+        let was_asking = asking(state);
         let (s, fx) = next(state, &event, &ctx);
         state = s;
-        // A check-in resolved (answered, timed out, or silenced): the "since the
-        // last check-in" window restarts, so the accumulator empties with it.
-        if was_asking && !matches!(state, State::CheckIn { .. } | State::Choosing { .. }) {
+        // A check-in resolved (answered, timed out, or silenced) — including its
+        // classification tail: the "since the last check-in" window restarts, so
+        // the accumulator empties with it.
+        if was_asking && !asking(state) {
             seen_tools.clear();
         }
         run_effects(fx, now.unix, &mut res);

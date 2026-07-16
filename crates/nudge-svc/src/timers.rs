@@ -147,6 +147,23 @@ pub fn message_loop(
                 PromptClick::No => LoopSignal::Core(Event::CheckInNo(local_now().unix)),
                 PromptClick::Break => LoopSignal::Break(local_now().unix),
                 PromptClick::Open => LoopSignal::OpenApp,
+                PromptClick::PickTask(id) => {
+                    LoopSignal::Core(Event::PickTask(local_now().unix, id))
+                }
+                // The classify window owns the row-index → app-name mapping; a
+                // row that no longer resolves (screen torn down between click
+                // and drain) is dropped rather than misrouted.
+                PromptClick::ClassifyRow(i, choice) => match crate::classify::app_at(i) {
+                    Some(app_name) => LoopSignal::Core(Event::Classify {
+                        at: local_now().unix,
+                        app_name,
+                        choice,
+                    }),
+                    None => continue,
+                },
+                PromptClick::ClassifyDone => {
+                    LoopSignal::Core(Event::ClassifyDone(local_now().unix))
+                }
             };
             on_signal(signal);
         }

@@ -195,6 +195,9 @@ pub fn context_with_tasks(rules: &Rules, tasks: &[Task], now: LocalNow) -> Sched
         // §6.4: `true` default for the same reason — only a due on-task tick's
         // probe (svc) may flip it, so a missing signal never manufactures a nag.
         any_task_on_task: true,
+        // Tools-since-last-check-in accumulator snapshot (Tier-B P2): the svc
+        // fills it only while a check-in that can enter classification is up.
+        classify_tools: Vec::new(),
     }
 }
 

@@ -274,3 +274,29 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
   `CheckIn{OnTask}`; §1-option-A accumulator `seen_tools: BTreeSet<String>` fills at sample/ontask
   probes, clears on check-in resolution (P2 consumes it).
 - 133 workspace tests green (was 122; +9 core state, +1 rules, +1 integration adjusted, +2 svc). Not committed.
+
+## Session 49 (2026-07-16) — Step 3 / PLAN-step3 P2: classification screen (svc + core)
+- **Core (`nudge-core`)**: `State::Classifying { task_id, shown_at }` (check-in family — ignored screen
+  dies at the schedule edge, break/pause silence it, `was_live` counts it); `Effect::{ShowClassify,
+  HideClassify}`; `Event::{PickTask(t,id), Classify{at,app_name,choice}, ClassifyDone(t)}` +
+  `ClassifyChoice::{Tool,NotTool,Ignore}`; `ScheduleCtx.classify_tools` (accumulator snapshot, empty
+  outside check-in family). Entry points: §6.5 OffTask **Yes** (guarded: tools accumulated AND
+  `window_task_id` present — else plain resolution, pre-P2 behaviour preserved; deviation from PLAN B.2:
+  reused `window_task_id` instead of adding `active_task_id`) and §6.4 OnTask **row pick**
+  (`PickTask` carries the row's id; classification routes to the *picked* task). `show_checkin(OnTask)`
+  now emits `ShowTaskList` — the picker IS the task list (P1's Yes/No/Break stub retired);
+  `hide_visible` tears it down from `CheckIn{OnTask}` too. `(Classifying, Classify)` stays put (svc
+  persists); `ClassifyDone`/`Skip` → `Started` with sample + ontask spine re-armed; reload re-emits.
+- **svc**: new `classify.rs` overlay (tasklist.rs skeleton: layered/topmost/noactivate, shared
+  `row_rect`/`btn_rect` paint+hit-test truth) — one row per tool, `[Tool][Not a tool][Ignore]` buttons,
+  chosen face highlight, Done footer; last-row choice auto-sends ClassifyDone. `PromptClick::{PickTask(i64),
+  ClassifyRow(usize,choice), ClassifyDone}` (index form keeps it `Copy`; `classify::app_at(i)` resolves at
+  drain, stale index dropped). tasklist rows now send `PickTask(row.task_id)` — `(Choosing, PickTask)`
+  resolves like Start (id acted on in P4/Tier-C). Persistence at the main-loop seam on `Event::Classify`:
+  new `persist.rs` writers `add_task_tool` (single-row INSERT OR IGNORE) + `set_app_class` (upsert);
+  Tool/Ignore → `task_tools`, NotTool → `app_classes`. `ctx.task_rows` filled at the ontask tick (picker
+  rows ready the moment the check-in fires); `ctx.classify_tools` snapshotted while check-in family;
+  accumulator now clears only when leaving {CheckIn, Choosing, Classifying}.
+- 143 workspace tests green (was 133; +7 core, +2 svc classify, +1 persist). `cargo build -p nudge-svc
+  -p nudge-ctl` clean (2 pre-existing warnings). **Live drive deferred to P5** (PLAN E covers the same
+  path end-to-end; Step-2b scratch method notes apply). Not committed.

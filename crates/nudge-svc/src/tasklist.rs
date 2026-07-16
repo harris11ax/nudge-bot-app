@@ -271,15 +271,18 @@ extern "system" fn list_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                 send_click(PromptClick::Break);
                 return LRESULT(0);
             }
-            // A click on a row means "right, I'm on it" — which is the same answer
-            // Start gives, and resolves the check-in the same way. Switching the
-            // live window to the *picked* task is app-side work (PLAN Tier C), so
-            // the row's id is deliberately not acted on yet.
-            let n = rows().lock().map(|g| g.0.len()).unwrap_or(0);
-            for i in 0..n as i32 {
-                let rr = row_rect(i);
+            // A click on a row means "right, I'm on THAT" — the row's id rides
+            // along so an OnTask picker can route classification to the picked
+            // task. From the §6.5 Choosing list it still resolves like Start
+            // (switching the live window to the picked task is Tier-C, P4).
+            let ids: Vec<i64> = rows()
+                .lock()
+                .map(|g| g.0.iter().map(|r| r.task_id).collect())
+                .unwrap_or_default();
+            for (i, id) in ids.iter().enumerate() {
+                let rr = row_rect(i as i32);
                 if x >= rr.left && x < rr.right && y >= rr.top && y < rr.bottom {
-                    send_click(PromptClick::Start);
+                    send_click(PromptClick::PickTask(*id));
                     break;
                 }
             }

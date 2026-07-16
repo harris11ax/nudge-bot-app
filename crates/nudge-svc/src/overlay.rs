@@ -111,6 +111,17 @@ pub enum PromptClick {
     /// Click on the strip body (left of the button cluster): a notification
     /// click-through that launches/focuses nudge-app (P1). Not a core event.
     Open,
+    /// A §6.5/§6.4 task-list row was picked, carrying that row's `tasks` rowid
+    /// → `Event::PickTask` (which enters classification from an OnTask
+    /// check-in, and resolves like Start elsewhere).
+    PickTask(i64),
+    /// One classification-screen row's choice, by row index — the classify
+    /// window resolves the index back to its app name (keeps this enum `Copy`)
+    /// → `Event::Classify`.
+    ClassifyRow(usize, nudge_core::state::ClassifyChoice),
+    /// The classification screen finished (every row routed, or dismissed)
+    /// → `Event::ClassifyDone`.
+    ClassifyDone,
 }
 
 static REGISTER: Once = Once::new();
