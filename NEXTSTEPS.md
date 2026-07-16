@@ -129,7 +129,19 @@ OFF-task check-in Yes/No + §6.5 task list + Take-a-break + tray Pause. Full his
     desktop access granted up front, or have the user manually run the scratch-config repro and describe/
     screenshot what they see, before touching `overlay.rs` again.
 
-- [ ] **3 — Tier B: ON-task check-in (§6.4) + tool classification screen + rich Tools selector (§6.2)** | **Opus** | Planning run required.
+- [ ] **3 — Tier B: ON-task check-in (§6.4) + tool classification screen + rich Tools selector (§6.2)** | **Opus** |
+  **Planning DONE session 47 → [PLAN-step3.md](PLAN-step3.md).** Decisions LOCKED (PLAN-step3 §1): (A)
+  since-last-checkin = accumulate sampled apps in svc scratch; on-task cadence is a floor, user-configurable
+  `[escalation] ontask_checkin_secs` (default 1800, set to seconds for testing); ordering optimises for
+  fastest functional state. Execute the five phases in PLAN-step3 §2, one per session:
+  - **P1** core: `CheckInKind::OnTask` goes live (the dead variant), `Started.ontask_at` edge collapsed into
+    `arm_started`, `ScheduleCtx.any_task_on_task` broadened gate, `ontask_checkin_secs` rule.
+  - **P2** svc: classification screen — `Effect::ShowClassify`/`Event::Classify`, `classify.rs` overlay,
+    routes each accumulated tool → task tool-list / global not-tool / task-scoped ignore.
+  - **P3** nudge-app: §6.2 searchable chip selector + Settings Tools/Style tabs (DB model already exists).
+  - **P4** carried: Tier-C row-click task switch (state.rs:531-560 ignores row `task_id`) + §6.6 tray Pause
+    duration submenu.
+  - **P5** verify: tests + live drive (Step 2b scratch-config method) + review + HISTORY log.
   Deferred from Step 1 on purpose (PLAN §1): §6.4 overlaps §6.5's mechanics but needs the classification UI,
   and building it before that UI exists means building it twice. `CheckInKind` gains its `OnTask` variant
   here — that is the variant PLAN §2 named and P4 deliberately left out as dead code.
