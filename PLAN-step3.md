@@ -118,7 +118,7 @@ in live use. **This is the load-bearing choice — confirm before P2.**
   hook exists in connectors.rs or add it.
 - **Deliverable:** a task's tools are pickable in-app; classification decisions round-trip.
 
-### P4 — carried riders (Tier-C row-switch + §6.6 pause submenu)
+### P4 — carried riders (Tier-C row-switch + §6.6 pause submenu) — ✅ DONE session 51 (default taken per D.1: pick → straight `Started`+`LaunchTools`; `Started` gained `task_id` so the switch rebinds sampling/accrual, not just the launch; Custom pause input deferred — submenu ships 20m–1.5h + "Default (rules)"; paused tray icon added. 145 tests green)
 - **Row-click task switch:** today `Choosing`'s row pick ignores the row's `task_id`
   (state.rs:531-560, NEXTSTEPS Tier C). Make picking a row switch the live window/`Started` task to
   that `task_id` (launch its tools per §6.5 if not running — ShellExecute, skip running exes).

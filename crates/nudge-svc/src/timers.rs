@@ -82,10 +82,11 @@ pub enum LoopSignal {
     /// Notification click-through: launch/focus the nudge-app GUI and record the
     /// click. Carries no core `Event` — it's a pure svc-side side effect.
     OpenApp,
-    /// Tray Pause (§6.6) / Take-a-break (§6.5). Both become core events, but
-    /// their durations come from rules, which the loop deliberately doesn't hold
-    /// — main stamps them on.
-    Pause(UnixTime),
+    /// Tray Pause (§6.6): the submenu's chosen duration rides along; `None`
+    /// (the "Default (rules)" item) falls back to `[escalation] pause_secs`,
+    /// which lives in rules — the loop deliberately doesn't hold them, so main
+    /// stamps the fallback on. Break's duration is rules-only, same deal.
+    Pause(UnixTime, Option<i64>),
     Break(UnixTime),
 }
 
@@ -129,7 +130,7 @@ pub fn message_loop(
                 TrayCmd::Toggle => {
                     on_signal(LoopSignal::Core(Event::HotkeyToggle(local_now().unix)))
                 }
-                TrayCmd::Pause => on_signal(LoopSignal::Pause(local_now().unix)),
+                TrayCmd::Pause(secs) => on_signal(LoopSignal::Pause(local_now().unix, secs)),
                 TrayCmd::Resume => {
                     on_signal(LoopSignal::Core(Event::Resume(local_now().unix)))
                 }

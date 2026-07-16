@@ -3,8 +3,8 @@
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below
      for branch/commit/PR conventions now that this is a real remote, not just a local tree. -->
 
-Last completed: session 50 — Step 3 / PLAN-step3 **P3** (nudge-app Tools selector + Settings tabs).
-Next: P4 (Tier-C row-click task switch + tray Pause submenu). Full history: [HISTORY.md](HISTORY.md).
+Last completed: session 51 — Step 3 / PLAN-step3 **P4** (Tier-C row-click task switch + tray Pause submenu).
+Next: P5 (verification: live drive + review + tick Step 3). Full history: [HISTORY.md](HISTORY.md).
 
 ## Next steps
 - [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
@@ -153,8 +153,12 @@ Next: P4 (Tier-C row-click task switch + tray Pause submenu). Full history: [HIS
     → `meta.style_bands`); 10 new tauri commands; C.5 gap closed via new `aw_usage.rs` 90-day AW
     aggregation behind `refresh_app_usage` (24h cap). 43 app tests + vite build green. Not committed.
     Deferred: renderers don't read `style_bands` yet.
-  - **P4** carried: Tier-C row-click task switch (state.rs:531-560 ignores row `task_id`) + §6.6 tray Pause
-    duration submenu.
+  - **P4 ✅ (2026-07-16, session 51)** Tier-C switch + tray Pause submenu: `Started` gains `task_id`
+    (window-seeded; a list `PickTask` rebinds it and emits new `Effect::LaunchTools` — svc launches
+    `task_tools(kind='tool')` minus running exes via Toolhelp+ShellExecute); sample compare/accrual
+    follow the carried task. Tray Pause → duration submenu (20m–1.5h + rules default,
+    `TrayCmd::Pause(Option<i64>)`); paused-state tray icon (grey pause bars). Custom pause input
+    deferred. 145 workspace tests green. Not committed.
   - **P5** verify: tests + live drive (Step 2b scratch-config method) + review + HISTORY log.
   Deferred from Step 1 on purpose (PLAN §1): §6.4 overlaps §6.5's mechanics but needs the classification UI,
   and building it before that UI exists means building it twice. `CheckInKind` gains its `OnTask` variant

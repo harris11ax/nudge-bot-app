@@ -326,3 +326,28 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
 - nudge-app backend tests 43 green (was 40); `vite build` clean. svc/core untouched. Not committed.
 - Deferred: renderers don't consume `style_bands` yet (svc/Planner read is follow-up); ontask cadence
   stays rules.toml-only (Settings edit of rules.toml out of app scope).
+
+## Session 51 (2026-07-16) — Step 3 / PLAN-step3 P4: Tier-C row-click task switch + tray Pause submenu
+- **Core (state.rs)**: `Started` gains `task_id: Option<i64>` — the task the sampling spine measures.
+  Seeded from `ctx.window_task_id` at every fresh start (Ack, check-in resolutions, resume); `None` on
+  Skip. New `Effect::LaunchTools { task_id }`. New Tier-C arm `(CheckIn|Choosing, PickTask(id))` →
+  hide, `LaunchTools`, log started/CheckedIn, `Started { task_id: Some(id) }` — PickTask removed from
+  the generic resolution union (a pick now *switches*, not just dismisses). The guarded OnTask-pick →
+  classification arm also emits `LaunchTools`; `(Classifying, ClassifyDone|Skip)` lands `Started`
+  bound to the classified task. LaunchTools deliberately NOT emitted on plain Yes/Ack (no surprise app
+  launches on "still on it"). Known nit: a pause during a picked task resumes bound to the *window's*
+  task (`Paused` only keeps `was_started: bool`).
+- **svc**: `launch.rs` gains `launch_tools(db, task_id)` — `task_tools(kind='tool')` minus running
+  exes (Toolhelp snapshot, case-insensitive; pure `tools_to_launch` filter unit-tested), rest launched
+  via `ShellExecuteW` (PATH/App-Paths resolution, best-effort per exe). New Cargo feature
+  `Win32_System_Diagnostics_ToolHelp`. `run_effects` handles `LaunchTools`. Sample edge now compares/
+  accrues against the `Started`-carried task (fallback `window_task_id`), so a switch redirects
+  `logged_minutes` too.
+- **Tray (§6.6)**: single Pause item → `Submenu` 20m/30m/45m/1h/1.5h + "Default (rules)"
+  (`PAUSE_CHOICES`); `TrayCmd::Pause(Option<i64>)` / `LoopSignal::Pause(t, secs)`, main stamps
+  `pause_secs` only on the None fallback. Custom free-input duration deferred (needs an input surface;
+  Settings UI candidate). Tray icon now mirrors paused state — grey pause-bars tile vs blue arrow
+  (`set_paused`, flipped only on the Paused-state edge).
+- 145 workspace tests green (was 143; +2 core, +1 svc launch filter, net of reworked pick tests).
+  `cargo build -p nudge-svc -p nudge-ctl` clean. Live drive (incl. tray submenu real-click) deferred
+  to P5 per plan. Not committed.

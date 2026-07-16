@@ -42,6 +42,7 @@ fn example_rules_full_day_cycle() {
             sample_at: None,
             off_task_since: None,
             ontask_at: Some(60 + 1800),
+            task_id: None,
         }
     );
     assert!(fx.contains(&Effect::HidePrompt));

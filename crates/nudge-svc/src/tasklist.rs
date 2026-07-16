@@ -272,9 +272,10 @@ extern "system" fn list_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                 return LRESULT(0);
             }
             // A click on a row means "right, I'm on THAT" — the row's id rides
-            // along so an OnTask picker can route classification to the picked
-            // task. From the §6.5 Choosing list it still resolves like Start
-            // (switching the live window to the picked task is Tier-C, P4).
+            // along so an OnTask picker routes classification to the picked
+            // task, and (Tier-C, P4) any list pick switches the live task:
+            // core rebinds `Started` to it and emits `LaunchTools` for its
+            // not-yet-running tools.
             let ids: Vec<i64> = rows()
                 .lock()
                 .map(|g| g.0.iter().map(|r| r.task_id).collect())

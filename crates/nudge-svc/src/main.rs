@@ -182,6 +182,8 @@ fn run_effects(effects: Vec<Effect>, now: i64, res: &mut Resources) {
                 res.classify = Some(classify::Classify::create(&tools))
             }
             Effect::HideClassify => drop(res.classify.take()),
+            // Tier-C row switch: get the picked task's not-yet-running tools up.
+            Effect::LaunchTools { task_id } => launch::launch_tools(&res.db, task_id),
             Effect::PlaySound => sound::alert(),
             Effect::ArmEdgeTimer { at, kind: _ } => res.edge_timer.arm_absolute(at),
             Effect::LogEdge { entered, at, mode } => {
@@ -302,9 +304,12 @@ fn main() {
                 return;
             }
             timers::LoopSignal::Core(e) => e,
-            // Pause/break durations live in rules, which the message loop doesn't
-            // hold; stamp them on here.
-            timers::LoopSignal::Pause(t) => Event::PauseFor(t, rules.escalation.pause_secs),
+            // The Pause submenu's pick rides the signal; "Default (rules)" and
+            // Break fall back to durations from rules, which the message loop
+            // doesn't hold — stamp them on here.
+            timers::LoopSignal::Pause(t, secs) => {
+                Event::PauseFor(t, secs.unwrap_or(rules.escalation.pause_secs))
+            }
             timers::LoopSignal::Break(t) => Event::BreakFor(t, rules.escalation.break_secs),
             timers::LoopSignal::Reload => {
                 // Re-read rules.toml from disk. On any read/parse error, keep the
@@ -365,10 +370,17 @@ fn main() {
             if let Some(a) = &app {
                 seen_tools.insert(a.clone());
             }
+            // Tier-C: `Started` carries the task it's bound to (a row pick may
+            // have switched away from the schedule window's task); fall back to
+            // the window's task for pre-pick/rules-only states.
+            let live_task = match state {
+                State::Started { task_id: Some(id), .. } => Some(id),
+                _ => ctx.window_task_id,
+            };
             ctx.foreground_on_task =
-                foreground_on_task(&res.db, &rules, ctx.window_task_id, app.as_deref());
+                foreground_on_task(&res.db, &rules, live_task, app.as_deref());
             if ctx.foreground_on_task {
-                if let (Some(id), Some(secs)) = (ctx.window_task_id, ctx.sample_secs) {
+                if let (Some(id), Some(secs)) = (live_task, ctx.sample_secs) {
                     let logged = tasks.iter().find(|t| t.id == Some(id)).map_or(0, |t| t.logged_minutes);
                     res.db.set_logged_minutes(id, logged + (secs / 60) as u32);
                 }
@@ -432,8 +444,15 @@ fn main() {
             )
         };
         let was_asking = asking(state);
+        let was_paused = matches!(state, State::Paused { .. });
         let (s, fx) = next(state, &event, &ctx);
         state = s;
+        // §6.6: the tray icon mirrors paused state; only touched on the flip so
+        // the common transition doesn't re-set an unchanged icon.
+        let now_paused = matches!(state, State::Paused { .. });
+        if now_paused != was_paused {
+            tray.set_paused(now_paused);
+        }
         // A check-in resolved (answered, timed out, or silenced) — including its
         // classification tail: the "since the last check-in" window restarts, so
         // the accumulator empties with it.
@@ -504,6 +523,7 @@ mod tests {
             sample_at,
             off_task_since: None,
             ontask_at: None,
+            task_id: None,
         }
     }
 
@@ -643,6 +663,7 @@ mod tests {
             sample_at: None,
             off_task_since: None,
             ontask_at: Some(3000),
+            task_id: None,
         };
         assert!(ontask_due(live, 3000, &Event::EdgeTimer(3000)));
         assert!(!ontask_due(live, 2900, &Event::EdgeTimer(2900)));
