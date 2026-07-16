@@ -127,7 +127,7 @@ in live use. **This is the load-bearing choice — confirm before P2.**
   — only the `Event`/`TrayCmd` gains a duration. Tray icon reflects paused state.
 - **Deliverable:** row pick redirects focus; pause offers durations.
 
-### P5 — verification
+### P5 — verification — ✅ DONE session 52 (live drive + review clean; 4 non-blocking findings in HISTORY §52; tray Pause submenu still needs a real tray click)
 - `cargo test` workspace green; `cargo build -p nudge-svc -p nudge-ctl` clean.
 - Live end-to-end drive of the on-task check-in → classification → persisted buckets, via the Step
   2b scratch-config method (document any new hotkey/timer caveats in HISTORY).

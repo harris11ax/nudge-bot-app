@@ -351,3 +351,21 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
 - 145 workspace tests green (was 143; +2 core, +1 svc launch filter, net of reworked pick tests).
   `cargo build -p nudge-svc -p nudge-ctl` clean. Live drive (incl. tray submenu real-click) deferred
   to P5 per plan. Not committed.
+
+## Session 52 (2026-07-16) — Step 3 / PLAN-step3 P5: verification — Step 3 DONE
+- 145 workspace tests green; `cargo build -p nudge-svc -p nudge-ctl` clean; nudge-app `vite build` clean.
+- **Live end-to-end drive** (Step 2b scratch-config method, `ontask_checkin_secs=40`/`sample_secs=10`,
+  task seeded with `task_tools=('definitely-not-running.exe','tool')` so real foreground reads off-task):
+  prompting→Start click→started → §6.4 on-task check-in fired at cadence → task-list picker rendered
+  ("What's actually due", red-outline <24h row, Take a break) → row click `PickTask` → classification
+  screen (`[Tool][Not a tool][Ignore]`+Done) → Tool click persisted `(task,'claude.exe','tool')` to
+  `task_tools`, auto-Done → started. A separate user-driven real-mouse pass persisted
+  `('brave.exe','not_tool')` to `app_classes` (global NotTool path). All verified via sessions.db edges
+  + PrintWindow captures. Tray Pause submenu still unexercised (needs real tray click).
+- Method notes: FindWindowW needs `IntPtr::Zero` title (empty-string binds to exact-match and misses);
+  classes `NudgeTaskList`(520w)/`NudgeClassify`(560w); row y = 34+15, classify Tool btn x≈352.
+- **Review pass (low)**: 4 findings, none blocking — (1) re-Pause while Paused loses `was_started`
+  (`was_live` doesn't match `Paused`); (2)+(3) CheckIn/Choosing don't carry `task_id`, so any check-in
+  resolution/classification rebinds to `window_task_id`, dropping a Tier-C pick; (4) `logged_minutes`
+  accrual truncates `sample_secs/60` → 0 for sub-minute cadences. Candidates for a follow-up step.
+- Step 3 ticked in NEXTSTEPS. Not committed.

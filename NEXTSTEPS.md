@@ -3,8 +3,10 @@
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below
      for branch/commit/PR conventions now that this is a real remote, not just a local tree. -->
 
-Last completed: session 51 — Step 3 / PLAN-step3 **P4** (Tier-C row-click task switch + tray Pause submenu).
-Next: P5 (verification: live drive + review + tick Step 3). Full history: [HISTORY.md](HISTORY.md).
+Last completed: session 52 — Step 3 **DONE** (P5 verification: live drive + review). Review left 4
+non-blocking findings (task_id carry across check-ins, re-Pause was_started, logged_minutes truncation
+— see HISTORY session 52) — candidates for a follow-up fix step. Tray Pause submenu still needs a real
+tray click. Full history: [HISTORY.md](HISTORY.md).
 
 ## Next steps
 - [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
@@ -129,7 +131,7 @@ Next: P5 (verification: live drive + review + tick Step 3). Full history: [HISTO
     desktop access granted up front, or have the user manually run the scratch-config repro and describe/
     screenshot what they see, before touching `overlay.rs` again.
 
-- [ ] **3 — Tier B: ON-task check-in (§6.4) + tool classification screen + rich Tools selector (§6.2)** | **Opus** |
+- [x] **3 — Tier B: ON-task check-in (§6.4) + tool classification screen + rich Tools selector (§6.2)** | **Opus** |
   **Planning DONE session 47 → [PLAN-step3.md](PLAN-step3.md).** Decisions LOCKED (PLAN-step3 §1): (A)
   since-last-checkin = accumulate sampled apps in svc scratch; on-task cadence is a floor, user-configurable
   `[escalation] ontask_checkin_secs` (default 1800, set to seconds for testing); ordering optimises for
@@ -159,7 +161,9 @@ Next: P5 (verification: live drive + review + tick Step 3). Full history: [HISTO
     follow the carried task. Tray Pause → duration submenu (20m–1.5h + rules default,
     `TrayCmd::Pause(Option<i64>)`); paused-state tray icon (grey pause bars). Custom pause input
     deferred. 145 workspace tests green. Not committed.
-  - **P5** verify: tests + live drive (Step 2b scratch-config method) + review + HISTORY log.
+  - **P5 ✅ (2026-07-16, session 52)** verify: 145 tests + svc/ctl/app builds green; live drive of
+    on-task check-in → task-list pick → classification → `task_tools`/`app_classes` persisted (both
+    synthetic and real-mouse). Review (low): 4 non-blocking findings logged in HISTORY session 52.
   Deferred from Step 1 on purpose (PLAN §1): §6.4 overlaps §6.5's mechanics but needs the classification UI,
   and building it before that UI exists means building it twice. `CheckInKind` gains its `OnTask` variant
   here — that is the variant PLAN §2 named and P4 deliberately left out as dead code.
