@@ -43,13 +43,8 @@ impl EdgeTimer {
     /// Re-arming replaces the previous due time (never two timers).
     pub fn arm_absolute(&mut self, at: UnixTime) {
         let due: i64 = (at + FILETIME_UNIX_OFFSET) * 10_000_000; // 100 ns FILETIME units, positive = absolute
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        eprintln!("DEBUG arm_absolute at={at} (now={now}, delta={}s)", at - now);
         unsafe {
-            SetWaitableTimerEx(self.handle, &due, 0, None, None, None, 1_000) // TEMP: 30_000 in prod, shrunk for live-drive testing
+            SetWaitableTimerEx(self.handle, &due, 0, None, None, None, 30_000)
                 .expect("SetWaitableTimerEx");
         }
     }
@@ -108,7 +103,6 @@ pub fn message_loop(
         let wait = unsafe {
             MsgWaitForMultipleObjects(Some(&[timer, quit, reload]), false, INFINITE, QS_ALLINPUT)
         };
-        eprintln!("DEBUG loop wake: wait={}", wait.0);
         if wait == WAIT_OBJECT_0 {
             on_signal(LoopSignal::Core(Event::EdgeTimer(local_now().unix)));
         } else if wait.0 == WAIT_OBJECT_0.0 + 1 {

@@ -239,3 +239,22 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
 - **Deferred, deliberately**: tray Pause *submenu* of durations (single configured duration for now); a row
   click resolves the check-in but does **not** switch the live window to the picked task (PLAN Tier C,
   app-side). Not committed.
+
+## Session 46 (2026-07-16) — Step 2b: button-paint "bug" + off-task check-in, resolved & driven live
+- **Both 2b items closed with zero code changes** — each was environmental, not a defect.
+- **Buttons were always painting.** Session 44's screenshots used BitBlt-family capture
+  (`Graphics.CopyFromScreen`), which skips `WS_EX_LAYERED` windows without `CAPTUREBLT`. Capturing the
+  `NudgeAnchor` hwnd via `PrintWindow(..., PW_RENDERFULLCONTENT)` shows face/frame/labels rendered for
+  both button sets. Works even at the Windows lock screen — no computer-use permission needed.
+- **Off-task check-in fires.** Two stacked masks in sessions 44/45's setup: (1) the 30s tolerable-delay
+  on `SetWaitableTimerEx` stretches a 15s sample cadence to ~45s real; (2) a rules-window not linked to a
+  task has `window_task_id = None`, and with `productive_apps` empty, `foreground_on_task` deliberately
+  reads on-task ("nothing configured → never nag") — so no drift could ever accrue. With
+  `[classify] productive_apps` set in the scratch config, the whole §6.5 path ran.
+- **Driven end-to-end** (scratch `$env:LOCALAPPDATA`, 2–3s test durations + temporarily shrunk timer
+  tolerance, `PostMessage` clicks, `PrintWindow` captures, sessions.db edge assertions):
+  prompting→Start→started → sample edges → drift check-in `[Yes][No][Break]` → Yes→started;
+  No→choosing + task list ("What's actually due", red-outline <24h row, Take-a-break) →
+  break→expiry→resumed. Instrumentation reverted; 122/122 workspace tests green.
+- **Still unexercised**: tray Pause/Resume (real tray-menu click required; synthetic input can't reach
+  it) — fold into Tier B's live pass. Not committed.

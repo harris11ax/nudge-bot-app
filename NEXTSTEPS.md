@@ -72,7 +72,27 @@ OFF-task check-in Yes/No + §6.5 task list + Take-a-break + tray Pause. Full his
     of `PostMessage`, or add an `eprintln!` at the `sample_due`/`arm_started` call sites to confirm the
     timer is arming) before touching Tier B.
 
-- [ ] **2b — Fix invisible prompt buttons + verify off-task check-in fires** | **Sonnet** | ~1-2h —
+- [x] **2b — Fix invisible prompt buttons + verify off-task check-in fires** | **Sonnet** | DONE session 46.
+  **Both items resolved — neither was a code bug.**
+  1. Button paint "bug" was a screenshot artifact: the strip is `WS_EX_LAYERED`, and BitBlt-based capture
+     (`Graphics.CopyFromScreen`, session 44's screenshots) omits layered windows unless `CAPTUREBLT` is set.
+     `PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT)` on the `NudgeAnchor` hwnd shows buttons render perfectly
+     (face + frame + labels, both `[Start][Snooze][Skip]` and `[Yes][No][Break]`). `overlay.rs` untouched.
+  2. Off-task check-in fires correctly. Session 44 never saw it for two stacked reasons, both environmental:
+     (a) the 30s `SetWaitableTimerEx` tolerable-delay makes each sample edge land up to `sample_secs+30s`
+     late (a 15s cadence really ticks ~45s) — patient waiting shows the timer is fine; and (b) with the
+     test's rules-window unlinked to any task, `window_task_id` is None and an empty `productive_apps`
+     means `foreground_on_task` reads on-task by design ("nothing configured → never nag"), so no drift
+     accrues. Adding `[classify] productive_apps` to the scratch config made the full path run.
+  Driven end-to-end live (session 46): prompting→Start→started, sample edges, off-task drift check-in
+  (`[Yes][No][Break]` strip), Yes→started, No→choosing + task list render ("What's actually due", red
+  outline <24h row, Take-a-break button), Take-a-break→break→expiry→started/resumed. All verified via
+  sessions.db edges + PrintWindow captures. 122 workspace tests green. **Tray Pause/Resume remains
+  unexercised** (needs a real tray-menu click; synthetic input can't reach it — fold into Tier B testing).
+  Method notes for future live-driving: `PrintWindow` + `PW_RENDERFULLCONTENT` for screenshots of the
+  layered strip (works even at the lock screen); `PostMessage(WM_LBUTTONDOWN)` drives buttons fine;
+  timer coalescing means allow +30s on every edge, or temporarily shrink the tolerance in
+  `timers.rs::arm_absolute` while testing.
   UNSKIPPABLE before Tier B, found by Step 2 (session 44). Two items, do both in one pass since both
   need the same scratch-config driving method already set up in Step 2's notes:
   1. Button paint bug: `crates/nudge-svc/src/overlay.rs` `anchor_proc` `WM_PAINT` handler draws buttons
