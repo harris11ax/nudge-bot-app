@@ -49,9 +49,12 @@ export async function quickAdd(line) {
   await refresh();
 }
 
+/** Insert via the structured form; returns the stored TaskDto (with its id) so
+ *  callers can attach child rows (e.g. §6.2 task_tools). */
 export async function createTask(form) {
-  await addTask(form);
+  const task = await addTask(form);
   await refresh();
+  return task;
 }
 
 export async function removeTask(id) {

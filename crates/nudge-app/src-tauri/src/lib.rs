@@ -3,6 +3,7 @@
 //! All heavy logic (quick-add grammar, recur specs, mode labels) lives in
 //! nudge-core / [`db`] so this file stays a serialization + wiring seam.
 
+mod aw_usage;
 mod connectors;
 mod db;
 mod google;
@@ -562,6 +563,184 @@ fn update_event(event_id: String, form: EventForm) -> Result<EventDto, String> {
     }
 }
 
+// --- Task tools + app classification (§6.2, PLAN-step3 P3) ---
+
+/// Wire shape of a selector/Settings app row (`app_usage` ⟕ `app_classes`).
+#[derive(Serialize)]
+pub struct AppDto {
+    pub name: String,
+    pub minutes_90d: i64,
+    /// `favorite | normal | hidden | not_tool` (unclassified reads `normal`).
+    pub class: String,
+}
+
+impl From<db::AppRow> for AppDto {
+    fn from(a: db::AppRow) -> Self {
+        AppDto { name: a.name, minutes_90d: a.minutes_90d, class: a.class }
+    }
+}
+
+/// One `(app_name, kind)` tool row; `kind ∈ tool | ignore`.
+#[derive(Serialize, Deserialize)]
+pub struct ToolDto {
+    pub app_name: String,
+    pub kind: String,
+}
+
+/// Every app the Tools selector can offer, usage-sorted descending. The
+/// frontend pins favorites and filters hidden — this is the raw union.
+#[tauri::command]
+fn list_apps_for_selector() -> Result<Vec<AppDto>, String> {
+    let store = open()?;
+    let rows = store
+        .list_apps_for_selector()
+        .map_err(|e| format!("list apps: {e}"))?;
+    Ok(rows.into_iter().map(AppDto::from).collect())
+}
+
+/// Replace a task's tool list wholesale (§6.4 contract: svc reads this at the
+/// sample compare), then ping the svc so the change is live immediately.
+#[tauri::command]
+fn set_task_tools_cmd(task_id: i64, tools: Vec<ToolDto>) -> Result<(), String> {
+    let mut store = open()?;
+    let pairs: Vec<(String, String)> = tools.into_iter().map(|t| (t.app_name, t.kind)).collect();
+    store
+        .set_task_tools(task_id, &pairs)
+        .map_err(|e| format!("set task tools: {e}"))?;
+    db::signal_reload();
+    Ok(())
+}
+
+/// A task's `(app_name, kind)` tool rows.
+#[tauri::command]
+fn list_task_tools_cmd(task_id: i64) -> Result<Vec<ToolDto>, String> {
+    let store = open()?;
+    let rows = store
+        .list_task_tools(task_id)
+        .map_err(|e| format!("list task tools: {e}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|(app_name, kind)| ToolDto { app_name, kind })
+        .collect())
+}
+
+/// Set an app's global class (§6.2 favorite|normal|hidden|not_tool).
+#[tauri::command]
+fn set_app_class_cmd(app_name: String, class: String) -> Result<(), String> {
+    if !matches!(class.as_str(), "favorite" | "normal" | "hidden" | "not_tool") {
+        return Err(format!("unknown app class: {class}"));
+    }
+    let store = open()?;
+    store
+        .set_app_class(&app_name, &class)
+        .map_err(|e| format!("set app class: {e}"))
+}
+
+/// Explicitly-classified apps (Settings — Tools tab).
+#[tauri::command]
+fn list_app_classes() -> Result<Vec<AppDto>, String> {
+    let store = open()?;
+    let rows = store
+        .list_app_classes()
+        .map_err(|e| format!("list app classes: {e}"))?;
+    Ok(rows.into_iter().map(AppDto::from).collect())
+}
+
+/// Not-Tool recommendation seed: high-usage apps never used as any task's tool
+/// and not yet classified.
+#[tauri::command]
+fn list_not_tool_candidates() -> Result<Vec<AppDto>, String> {
+    let store = open()?;
+    let rows = store
+        .list_not_tool_candidates(20)
+        .map_err(|e| format!("list not-tool candidates: {e}"))?;
+    Ok(rows.into_iter().map(AppDto::from).collect())
+}
+
+/// Read-only view of per-task ignore rows (Settings — Tools tab).
+#[derive(Serialize)]
+pub struct IgnoreDto {
+    pub task_id: i64,
+    pub task_title: String,
+    pub app_name: String,
+}
+
+#[tauri::command]
+fn list_task_ignores() -> Result<Vec<IgnoreDto>, String> {
+    let store = open()?;
+    let rows = store
+        .list_all_ignores()
+        .map_err(|e| format!("list ignores: {e}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|(task_id, task_title, app_name)| IgnoreDto { task_id, task_title, app_name })
+        .collect())
+}
+
+/// §6.9 Style tab: completion-band colors persisted as a JSON array in `meta`.
+/// Empty vec = defaults (renderers keep their built-in palette).
+#[tauri::command]
+fn get_style_bands() -> Result<Vec<String>, String> {
+    let store = open()?;
+    let raw = store
+        .get_meta("style_bands")
+        .map_err(|e| format!("get style bands: {e}"))?;
+    match raw {
+        Some(s) => serde_json::from_str(&s).map_err(|e| format!("parse style bands: {e}")),
+        None => Ok(Vec::new()),
+    }
+}
+
+#[tauri::command]
+fn set_style_bands(bands: Vec<String>) -> Result<(), String> {
+    let store = open()?;
+    let s = serde_json::to_string(&bands).map_err(|e| format!("encode style bands: {e}"))?;
+    store
+        .set_meta("style_bands", &s)
+        .map_err(|e| format!("set style bands: {e}"))
+}
+
+/// Refresh the `app_usage` cache from ActivityWatch (90-day window aggregate),
+/// respecting the §6.7 24h cap unless `force`. Returns the resulting
+/// `app_usage_last_refresh` unix stamp (unchanged on a cap no-op). AW being
+/// down is not an error — it just refreshes zero rows and does NOT stamp, so
+/// the next call retries.
+#[tauri::command]
+fn refresh_app_usage(force: bool) -> Result<i64, String> {
+    let store = open()?;
+    let now = now_unix();
+    if !force {
+        if let Some(last_ts) = store
+            .get_meta("app_usage_last_refresh")
+            .map_err(|e| format!("get meta: {e}"))?
+            .and_then(|s| s.parse::<i64>().ok())
+        {
+            if now - last_ts < 24 * 3600 {
+                return Ok(last_ts);
+            }
+        }
+    }
+    let usage = aw_usage::fetch_usage(90, now);
+    if usage.is_empty() {
+        // AW down or no window bucket: keep the stale cache + stamp so a
+        // retry isn't gated behind the 24h cap.
+        return Ok(store
+            .get_meta("app_usage_last_refresh")
+            .map_err(|e| format!("get meta: {e}"))?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0));
+    }
+    for (app, minutes) in &usage {
+        store
+            .upsert_app_usage(app, *minutes, now)
+            .map_err(|e| format!("upsert app usage: {e}"))?;
+    }
+    store
+        .set_meta("app_usage_last_refresh", &now.to_string())
+        .map_err(|e| format!("set meta: {e}"))?;
+    Ok(now)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(windows)]
@@ -597,7 +776,17 @@ pub fn run() {
             list_suggested_triggers,
             accept_suggested_trigger,
             dismiss_suggested_trigger,
-            run_connectors
+            run_connectors,
+            list_apps_for_selector,
+            set_task_tools_cmd,
+            list_task_tools_cmd,
+            set_app_class_cmd,
+            list_app_classes,
+            list_not_tool_candidates,
+            list_task_ignores,
+            get_style_bands,
+            set_style_bands,
+            refresh_app_usage
         ])
         .run(tauri::generate_context!())
         .expect("error while running nudge-app");

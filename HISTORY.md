@@ -300,3 +300,29 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
 - 143 workspace tests green (was 133; +7 core, +2 svc classify, +1 persist). `cargo build -p nudge-svc
   -p nudge-ctl` clean (2 pre-existing warnings). **Live drive deferred to P5** (PLAN E covers the same
   path end-to-end; Step-2b scratch method notes apply). Not committed.
+
+## Session 50 (2026-07-16) — Step 3 / PLAN-step3 P3: nudge-app Tools selector + Settings Tools/Style tabs
+- **db.rs (app)**: new readers `list_apps_for_selector` (union of `app_usage` ⟕ `app_classes`, usage
+  desc — class-only apps still appear), `list_app_classes`, `list_not_tool_candidates(limit)` (high
+  usage, never in any `task_tools`, unclassified), `list_all_ignores` (kind='ignore' joined to task
+  titles) + `AppRow`. New test `selector_and_not_tool_candidate_queries`.
+- **C.5 gap confirmed + closed**: no `app_usage` refresh path existed anywhere. New app-side module
+  `aw_usage.rs` — 90-day AW window-bucket range read (`events?start=&end=`), per-app `duration`
+  aggregation to minutes (pure, unit-tested), svc `aw_query` conventions (prefix bucket match,
+  fail-to-empty; looser 20s read budget for the big body). `refresh_app_usage(force)` command applies
+  the §6.7 24h cap via `meta.app_usage_last_refresh`; AW-down refreshes nothing and does NOT stamp,
+  so retry isn't gated.
+- **lib.rs**: 10 new commands registered — `list_apps_for_selector`, `set_task_tools_cmd` (+svc reload
+  ping), `list_task_tools_cmd`, `set_app_class_cmd` (class validated), `list_app_classes`,
+  `list_not_tool_candidates`, `list_task_ignores`, `get/set_style_bands` (JSON array in
+  `meta.style_bands`, [] = renderer defaults), `refresh_app_usage`. `AppDto`/`ToolDto`/`IgnoreDto`.
+- **Frontend**: new `ToolSelector.svelte` (§6.2: substring filter, usage-sorted, favorites pinned,
+  hidden behind toggle, not-tools excluded, removable chips, "Add tool manually"); Triggers full form
+  gains Estimate (min) + Tools (persists via `set_task_tools` after insert — `createTask` now returns
+  the TaskDto). New `settings/Settings.svelte` shell (General/Tools/Style sub-tabs; General keeps
+  GoogleConnect) replacing App.svelte's inline stub; `ToolsTab.svelte` (favorite/normal/hidden
+  segmented + not-tool, Not-Tools list w/ restore, candidate seeding, read-only per-task ignores,
+  manual usage-refresh button); `StyleTab.svelte` (3 band color pickers → `meta.style_bands`).
+- nudge-app backend tests 43 green (was 40); `vite build` clean. svc/core untouched. Not committed.
+- Deferred: renderers don't consume `style_bands` yet (svc/Planner read is follow-up); ontask cadence
+  stays rules.toml-only (Settings edit of rules.toml out of app scope).

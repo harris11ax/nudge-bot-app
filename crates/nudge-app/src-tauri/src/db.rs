@@ -569,6 +569,79 @@ impl Store {
         )?;
         Ok(())
     }
+
+    /// Every app the selector can offer (§6.2): the union of usage-cached apps
+    /// and explicitly-classified apps, usage-sorted descending. An app in only
+    /// one table still appears (`class` defaults `'normal'`, `minutes_90d` 0).
+    /// The frontend does the favorite-pinning / hidden-filtering — this is the
+    /// raw, complete list.
+    pub fn list_apps_for_selector(&self) -> rusqlite::Result<Vec<AppRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT app_name, MAX(minutes_90d) AS minutes_90d, MAX(class) AS class FROM (
+                 SELECT u.app_name, u.minutes_90d, COALESCE(c.class, 'normal') AS class
+                   FROM app_usage u LEFT JOIN app_classes c ON c.app_name = u.app_name
+                 UNION ALL
+                 SELECT c.app_name, COALESCE(u.minutes_90d, 0), c.class
+                   FROM app_classes c LEFT JOIN app_usage u ON u.app_name = c.app_name
+             ) GROUP BY app_name
+             ORDER BY minutes_90d DESC, app_name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(AppRow { name: r.get(0)?, minutes_90d: r.get(1)?, class: r.get(2)? })
+        })?;
+        rows.collect()
+    }
+
+    /// Explicitly-classified apps only (Settings — Tools tab), usage-sorted.
+    pub fn list_app_classes(&self) -> rusqlite::Result<Vec<AppRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.app_name, COALESCE(u.minutes_90d, 0), c.class
+             FROM app_classes c LEFT JOIN app_usage u ON u.app_name = c.app_name
+             ORDER BY COALESCE(u.minutes_90d, 0) DESC, c.app_name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(AppRow { name: r.get(0)?, minutes_90d: r.get(1)?, class: r.get(2)? })
+        })?;
+        rows.collect()
+    }
+
+    /// Not-Tool recommendation seed (§6.2 Settings): high-usage apps that have
+    /// never appeared in any task's tool/ignore list and aren't already
+    /// classified. Bounded so the Settings list stays scannable.
+    pub fn list_not_tool_candidates(&self, limit: i64) -> rusqlite::Result<Vec<AppRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT u.app_name, u.minutes_90d, 'normal'
+             FROM app_usage u
+             WHERE u.app_name NOT IN (SELECT app_name FROM task_tools)
+               AND u.app_name NOT IN (SELECT app_name FROM app_classes)
+             ORDER BY u.minutes_90d DESC, u.app_name
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![limit], |r| {
+            Ok(AppRow { name: r.get(0)?, minutes_90d: r.get(1)?, class: r.get(2)? })
+        })?;
+        rows.collect()
+    }
+
+    /// Per-task ignore rows across ALL tasks (Settings read-only view):
+    /// `(task_id, task_title, app_name)` ordered by task then app.
+    pub fn list_all_ignores(&self) -> rusqlite::Result<Vec<(i64, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT tt.task_id, COALESCE(t.title, '(deleted task)'), tt.app_name
+             FROM task_tools tt LEFT JOIN tasks t ON t.id = tt.task_id
+             WHERE tt.kind = 'ignore'
+             ORDER BY tt.task_id, tt.app_name",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect()
+    }
+}
+
+/// Row shape for the §6.2 selector/Settings app lists.
+pub struct AppRow {
+    pub name: String,
+    pub minutes_90d: i64,
+    pub class: String,
 }
 
 /// Row shape for [`Store::list_suggested_triggers`] — a connector-surfaced
@@ -673,6 +746,57 @@ mod tests {
             )
             .unwrap();
         assert_eq!((m, r), (200, 2000));
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // Selector list is the union of usage + classes, usage-sorted; not-tool
+    // candidates exclude anything already a task tool or already classified.
+    #[test]
+    fn selector_and_not_tool_candidate_queries() {
+        let (mut store, path) = temp_store("selector");
+        store.upsert_app_usage("code.exe", 500, 1).unwrap();
+        store.upsert_app_usage("chrome.exe", 300, 1).unwrap();
+        store.upsert_app_usage("game.exe", 200, 1).unwrap();
+        store.set_app_class("code.exe", "favorite").unwrap();
+        store.set_app_class("obscure.exe", "hidden").unwrap(); // classified, no usage
+
+        let apps = store.list_apps_for_selector().unwrap();
+        let names: Vec<&str> = apps.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["code.exe", "chrome.exe", "game.exe", "obscure.exe"]);
+        assert_eq!(apps[0].class, "favorite");
+        assert_eq!(apps[1].class, "normal"); // usage-only app defaults normal
+        assert_eq!(apps[3].minutes_90d, 0); // class-only app defaults 0 usage
+
+        let classed = store.list_app_classes().unwrap();
+        assert_eq!(classed.len(), 2);
+
+        // chrome + game are unclassified non-tools; making chrome a task tool
+        // removes it from the candidate list.
+        let t = Task {
+            id: None,
+            title: "t".into(),
+            desc: String::new(),
+            deadline: None,
+            task_type: String::new(),
+            minutes: None,
+            recur: Recur::Once,
+            mode_override: None,
+            trigger_source: TriggerSource::Manual,
+            gcal_event_id: None,
+            estimate_minutes: None,
+            logged_minutes: 0,
+        };
+        let id = store.insert(&t).unwrap();
+        store.set_task_tools(id, &[("chrome.exe".into(), "tool".into()), ("slack.exe".into(), "ignore".into())]).unwrap();
+        let cands = store.list_not_tool_candidates(10).unwrap();
+        let cand_names: Vec<&str> = cands.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(cand_names, vec!["game.exe"]);
+
+        // Ignore rows surface with their task title.
+        let ignores = store.list_all_ignores().unwrap();
+        assert_eq!(ignores, vec![(id, "t".to_string(), "slack.exe".to_string())]);
 
         drop(store);
         let _ = std::fs::remove_file(&path);

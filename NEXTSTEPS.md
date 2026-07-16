@@ -3,8 +3,8 @@
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below
      for branch/commit/PR conventions now that this is a real remote, not just a local tree. -->
 
-Last completed: session 49 — Step 3 / PLAN-step3 **P2** (classification screen, core + svc).
-Next: P3 (nudge-app Tools selector + Settings tabs). Full history: [HISTORY.md](HISTORY.md).
+Last completed: session 50 — Step 3 / PLAN-step3 **P3** (nudge-app Tools selector + Settings tabs).
+Next: P4 (Tier-C row-click task switch + tray Pause submenu). Full history: [HISTORY.md](HISTORY.md).
 
 ## Next steps
 - [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
@@ -147,7 +147,12 @@ Next: P3 (nudge-app Tools selector + Settings tabs). Full history: [HISTORY.md](
     like Start); OffTask Yes classifies only when tools accumulated + window has a task (else pre-P2
     behaviour). Persistence via new svc writers `add_task_tool`/`set_app_class` at the main-loop seam.
     143 tests green. Live drive deferred to P5. Not committed.
-  - **P3** nudge-app: §6.2 searchable chip selector + Settings Tools/Style tabs (DB model already exists).
+  - **P3 ✅ (2026-07-16, session 50)** nudge-app: `ToolSelector.svelte` chip selector (usage-sorted,
+    favorites pinned, hidden toggle, manual add) in the Triggers form + Estimate field; Settings shell
+    with Tools tab (favorite/normal/hidden/not-tool, candidates, ignores view) + Style tab (band colors
+    → `meta.style_bands`); 10 new tauri commands; C.5 gap closed via new `aw_usage.rs` 90-day AW
+    aggregation behind `refresh_app_usage` (24h cap). 43 app tests + vite build green. Not committed.
+    Deferred: renderers don't read `style_bands` yet.
   - **P4** carried: Tier-C row-click task switch (state.rs:531-560 ignores row `task_id`) + §6.6 tray Pause
     duration submenu.
   - **P5** verify: tests + live drive (Step 2b scratch-config method) + review + HISTORY log.

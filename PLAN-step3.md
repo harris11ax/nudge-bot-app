@@ -104,7 +104,7 @@ in live use. **This is the load-bearing choice — confirm before P2.**
 - **Deliverable:** answering a check-in routes each tool to its bucket, persisted and visible in
   `task_tools`/`app_classes`.
 
-### P3 — nudge-app: rich Tools selector (§6.2) + Settings Tools/Style tabs
+### P3 — nudge-app: rich Tools selector (§6.2) + Settings Tools/Style tabs — ✅ DONE session 50 (C.5 gap was real: no app_usage refresh existed; closed with app-side `aw_usage.rs` 90-day AW aggregate + 24h-capped `refresh_app_usage`. Style bands persist to `meta.style_bands`; renderer consumption deferred. 43 app tests + vite build green)
 - **New-task form selector (Planner/Triggers):** searchable multi-select dropdown → removable
   chips. Populate from `app_usage` (usage-sorted desc), favorites pinned, hidden excluded behind a
   "show hidden" toggle, substring filter, "Add tool manually" row. New ipc commands:

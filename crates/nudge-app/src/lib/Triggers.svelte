@@ -9,6 +9,8 @@
     dismissSuggestion,
     scanConnectors,
   } from "./store.svelte.js";
+  import { setTaskTools } from "./api.js";
+  import ToolSelector from "./ToolSelector.svelte";
 
   onMount(refreshSuggestedTriggers);
 
@@ -78,7 +80,10 @@
     recur: "once",
     deadline: "", // datetime-local → unix seconds on submit
     mode_override: "",
+    estimate: "", // minutes → estimate_minutes on submit
   });
+  // §6.2 tools picked for the new task — persisted via set_task_tools after insert.
+  let tools = $state(/** @type {Array<{app_name:string, kind:string}>} */ ([]));
   let formErr = $state("");
   let formOk = $state("");
 
@@ -104,11 +109,16 @@
       recur: form.recur.trim() || "once",
       deadline: form.deadline ? Math.floor(new Date(form.deadline).getTime() / 1000) : null,
       mode_override: form.mode_override || null,
+      estimate_minutes: form.estimate ? Number(form.estimate) : null,
     };
     try {
-      await createTask(payload);
+      const task = await createTask(payload);
+      if (tools.length && task?.id != null) {
+        await setTaskTools(task.id, $state.snapshot(tools));
+      }
       formOk = `Added: ${payload.title}`;
-      form = { title: "", desc: "", task_type: "", time: "", recur: "once", deadline: "", mode_override: "" };
+      form = { title: "", desc: "", task_type: "", time: "", recur: "once", deadline: "", mode_override: "", estimate: "" };
+      tools = [];
     } catch (err) {
       formErr = String(err);
     }
@@ -171,6 +181,8 @@
         <option value="on_task">Force soft (on-task)</option>
       </select>
     </label>
+    <label>Estimate (min)<input type="number" min="0" bind:value={form.estimate} placeholder="90" /></label>
+    <label class="wide">Tools<ToolSelector bind:selected={tools} /></label>
     <label class="wide">Description<textarea rows="2" bind:value={form.desc}></textarea></label>
     <div class="wide"><button class="primary" type="submit">Create trigger</button></div>
   </form>
