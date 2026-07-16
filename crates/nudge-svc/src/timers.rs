@@ -49,7 +49,7 @@ impl EdgeTimer {
             .as_secs() as i64;
         eprintln!("DEBUG arm_absolute at={at} (now={now}, delta={}s)", at - now);
         unsafe {
-            SetWaitableTimerEx(self.handle, &due, 0, None, None, None, 30_000)
+            SetWaitableTimerEx(self.handle, &due, 0, None, None, None, 1_000) // TEMP: 30_000 in prod, shrunk for live-drive testing
                 .expect("SetWaitableTimerEx");
         }
     }
