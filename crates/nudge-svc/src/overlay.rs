@@ -336,10 +336,13 @@ extern "system" fn anchor_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             // Buttons.
             let face = CreateSolidBrush(BTN_FACE);
             let frame = CreateSolidBrush(BTN_FRAME);
+            eprintln!("DEBUG paint: rc={{{},{},{},{}}} ps.rcPaint={{{},{},{},{}}} face={:?} frame={:?}", rc.left, rc.top, rc.right, rc.bottom, ps.rcPaint.left, ps.rcPaint.top, ps.rcPaint.right, ps.rcPaint.bottom, face, frame);
             for (i, (label, _)) in tag_buttons(tag).iter().enumerate() {
                 let mut br = button_rect(rc.right, rc.bottom, i as i32);
-                FillRect(hdc, &br, face);
-                FrameRect(hdc, &br, frame);
+                eprintln!("DEBUG button {i} {label} rect={{{},{},{},{}}}", br.left, br.top, br.right, br.bottom);
+                let fr1 = FillRect(hdc, &br, face);
+                let fr2 = FrameRect(hdc, &br, frame);
+                eprintln!("DEBUG fillrect={fr1} framerect={fr2}");
                 let mut lbl: Vec<u16> = label.encode_utf16().collect();
                 DrawTextW(hdc, &mut lbl, &mut br, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             }

@@ -85,6 +85,29 @@ OFF-task check-in Yes/No + §6.5 task list + Take-a-break + tray Pause. Full his
      around the paint bug, which may itself be the reason sampling never triggered.
   Once both are clean, finish driving the rest of Step 2's checklist (task-list render, Yes/No, Take-a-
   break, tray Pause/Resume) before starting Tier B.
+  - **Session 45 attempt — NOT resolved, re-pick this up next session.** Two background-agent delegation
+    attempts both failed: the agents got stuck in a confused loop each claiming the other was doing the
+    work, with zero real tool calls — do not delegate this step to a subagent again; drive it directly.
+    Doing it directly got as far as: workspace builds clean (`cargo build -p nudge-svc -p nudge-ctl`).
+    Scratch-config repro method reproduced from Step 2's notes and confirmed working: `$env:LOCALAPPDATA`
+    → a scratch temp dir, `rules.toml` with an always-live window + `sample_secs=15`/`off_task_secs=20`/
+    `break_secs=30`/`pause_secs=30`, one task seeded into the scratch `sessions.db` via Python's `sqlite3`
+    module (no `sqlite3` CLI installed in this env — use Python, and note `sqlite3.connect` needs a
+    Windows-style `C:/...` path, not the Git-Bash `/c/...` form, or it fails to open the file).
+    **New finding this session**: the default hotkey (`ctrl+alt+N`) collides with something already
+    registered on this machine and panics `nudge-svc` on launch (`RegisterHotKey ... already registered`)
+    — the scratch `rules.toml` must use a different combo (used `ctrl+alt+shift+Y` successfully). Worth
+    calling out in Step 2's/2b's method notes for whoever runs this next.
+    **Blocked**: could not get visual confirmation of the button-paint bug. `nudge-svc.exe` was running
+    live with the scratch config, but a `computer-use` `request_access` call for desktop screenshot access
+    was denied (`File Explorer` → `user_denied`), and `nudge-svc`'s window is a raw `WS_POPUP` tool window
+    with no taskbar identity anyway, so it's unclear the app-based permission model can even target it.
+    Static re-review of `overlay.rs`'s `WM_PAINT` handler (brush create/fill/frame/delete order, RECT
+    construction, tag packing/unpacking between paint and hit-test) found nothing conclusively wrong —
+    textbook GDI usage, consistent geometry between the two paths. **Live screen access is required to
+    make progress here**; static reading alone hasn' found the bug. Next session: either get computer-use
+    desktop access granted up front, or have the user manually run the scratch-config repro and describe/
+    screenshot what they see, before touching `overlay.rs` again.
 
 - [ ] **3 — Tier B: ON-task check-in (§6.4) + tool classification screen + rich Tools selector (§6.2)** | **Opus** | Planning run required.
   Deferred from Step 1 on purpose (PLAN §1): §6.4 overlaps §6.5's mechanics but needs the classification UI,
