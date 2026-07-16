@@ -5,8 +5,7 @@
 
 Last completed: session 52 — Step 3 **DONE** (P5 verification: live drive + review). Review left 4
 non-blocking findings (task_id carry across check-ins, re-Pause was_started, logged_minutes truncation
-— see HISTORY session 52) — candidates for a follow-up fix step. Tray Pause submenu still needs a real
-tray click. Full history: [HISTORY.md](HISTORY.md).
+— see HISTORY session 52) — now step 1 below). Next: step 1 (Sonnet, unskippable). Full history: [HISTORY.md](HISTORY.md).
 
 ## Next steps
 - [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
@@ -169,6 +168,37 @@ tray click. Full history: [HISTORY.md](HISTORY.md).
   here — that is the variant PLAN §2 named and P4 deliberately left out as dead code.
   Also lands here: a row click switching the live window to the *picked* task (P4 resolves the check-in but
   ignores the row's `task_id` — PLAN Tier C), and a tray Pause *submenu* of durations.
+
+- [ ] **1 — Fix session-52 review findings (task carry + pause + accrual)** | **Sonnet** | UNSKIPPABLE | ~2h
+  Four confirmed findings from the P5 review: (a) CheckIn/Choosing/Paused don't carry `Started.task_id`,
+  so any check-in resolution or classification rebinds to `ctx.window_task_id`, silently dropping a
+  Tier-C row-pick switch (state.rs ~560, ~653 — carry task_id through the check-in family);
+  (b) re-Pause while Paused loses `was_started` (`was_live` doesn't match `Paused`, state.rs ~386);
+  (c) `logged_minutes` accrual truncates `sample_secs/60` → 0 for sub-minute cadences (main.rs ~382 —
+  accrue seconds, convert at read). Extend the 145-test suite for each.
+
+- [ ] **2 — Verify tray Pause submenu with a real tray click** | **Sonnet** | ~30m
+  Unexercised since P4 (synthetic input can't reach the tray menu). Step 2b scratch-config method +
+  user clicks the tray: pick 20m → single `PauseExpiry` edge at +20m, grey paused icon, Resume works.
+  Do AFTER step 1 so the re-Pause fix is also covered.
+
+- [ ] **3 — Renderers consume `meta.style_bands`** | **Sonnet** | ~1h
+  Deferred from P3: StyleTab writes band colors to `meta.style_bands` but svc tasklist/overlay renderers
+  still use hardcoded band colors. Read the setting at rules/task load; fall back to defaults.
+
+- [ ] **4 — Deadline-only tasks (no time-of-day) + undated-once suggestions** | **Sonnet** | ~2h
+  Deferred from 10e: a once task with a deadline date but no `minutes` produces no window
+  (`Win::from_task` returns None). Design a sensible default window; also let
+  `accept_suggested_trigger` handle undated suggestions. (Escalate to Opus if scheduling semantics
+  get contentious.)
+
+- [ ] **5 — Custom pause duration input** | **Sonnet** | ~1h
+  Deferred from P4: tray submenu offers fixed durations only. Add a free-input surface —
+  likely a Settings field or small prompt window.
+
+- [ ] **6 — nudge-draft LLM title/time pass** | **Opus** | ~1d
+  Deferred from 10e: needs the binary crate split into lib+bin first, then an LLM pass that
+  drafts task titles/times from Gmail/GCal candidates. Architectural (crate split + API integration).
 
 ## Session model: Sonnet (default) | Opus gate on planning/complex design | Haiku for trivial tasks
 - Read NEXTSTEPS.md at start. Scan for incomplete steps:
