@@ -178,6 +178,7 @@ pub fn context_with_tasks(rules: &Rules, tasks: &[Task], now: LocalNow) -> Sched
         snooze_secs: rules.escalation.snooze_secs,
         checkin_after_secs: rules.escalation.checkin(),
         sample_secs: rules.escalation.sample(),
+        ontask_secs: rules.escalation.ontask(),
         off_task_secs: rules.escalation.off_task_secs,
         break_secs: rules.escalation.break_secs,
         // Only a live drift check-in can be answered No, so only the svc knows
@@ -191,6 +192,9 @@ pub fn context_with_tasks(rules: &Rules, tasks: &[Task], now: LocalNow) -> Sched
         presence: Presence::Unknown,
         mode: Mode::OffTask,
         foreground_on_task: true,
+        // §6.4: `true` default for the same reason — only a due on-task tick's
+        // probe (svc) may flip it, so a missing signal never manufactures a nag.
+        any_task_on_task: true,
     }
 }
 

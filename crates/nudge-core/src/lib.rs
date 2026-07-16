@@ -33,6 +33,10 @@ pub enum EdgeKind {
     /// structurally absent (`sample_at == None`) everywhere else, so an idle or
     /// paused machine has no sample edge to wake on (zero-polling, PLAN §7).
     Sample,
+    /// A §6.4 on-task check-in tick fell due: if the foreground app is off
+    /// EVERY due-window task's tools, ask "what are you working on?"; else
+    /// silently re-arm the next tick (the cadence is a floor, not a metronome).
+    OnTaskCheckIn,
     /// A tray Pause (§6.6) expired: resume supervision. While paused this is the
     /// *only* edge armed — the schedule edge is deliberately not merged, so
     /// nothing can fire mid-pause; it is recomputed fresh on resume.
@@ -54,6 +58,7 @@ impl EdgeKind {
             EdgeKind::SnoozeExpiry => "snooze_expiry",
             EdgeKind::CheckIn => "check_in",
             EdgeKind::Sample => "sample",
+            EdgeKind::OnTaskCheckIn => "ontask_check_in",
             EdgeKind::PauseExpiry => "pause_expiry",
             EdgeKind::BreakExpiry => "break_expiry",
         }

@@ -33,13 +33,15 @@ fn example_rules_full_day_cycle() {
     // User starts the task — prompt hidden, outcome logged, task Started.
     let (s, fx) = next(s, &Event::Ack(60), &ctx);
     // Sampling and check-ins are both off in rules.example.toml, so Started
-    // carries no runtime edges at all.
+    // carries neither of those edges; the §6.4 on-task check-in defaults ON
+    // (30-min floor), so its tick is armed one cadence out from the Ack.
     assert_eq!(
         s,
         State::Started {
             checkin_at: None,
             sample_at: None,
-            off_task_since: None
+            off_task_since: None,
+            ontask_at: Some(60 + 1800),
         }
     );
     assert!(fx.contains(&Effect::HidePrompt));

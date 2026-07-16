@@ -40,6 +40,48 @@ fn sample_due(state: State, now: i64, event: &Event) -> bool {
         && matches!(state, State::Started { sample_at: Some(t), .. } if now >= t)
 }
 
+/// Does the pending event land on a due §6.4 on-task check-in tick? Only then
+/// does the svc pay for the union-of-all-tools compare — every other transition
+/// leaves `any_task_on_task` at its safe `true` default.
+fn ontask_due(state: State, now: i64, event: &Event) -> bool {
+    matches!(event, Event::EdgeTimer(_) | Event::RulesReloaded(_))
+        && matches!(state, State::Started { ontask_at: Some(t), .. } if now >= t)
+}
+
+/// Is the foreground app in the tool list of ANY task in the dynamic deadline
+/// window (§6.4 broadened compare)? `rows` are the `display_list` output — the
+/// same "due window" the check-in's list will show.
+///
+/// Mirrors [`foreground_on_task`]'s never-nag-on-no-signal reads: no foreground
+/// app (AW down) → `true`; no tool configured on any due task → fall back to
+/// the global productive-app list, and if that too is empty → `true`.
+fn any_task_on_task(
+    db: &persist::Db,
+    rules: &nudge_core::rules::Rules,
+    rows: &[nudge_core::task_window::Row],
+    app: Option<&str>,
+) -> bool {
+    let Some(app) = app else { return true };
+    let mut any_tools = false;
+    for r in rows {
+        let tools = db.task_tools(r.task_id);
+        if tools.is_empty() {
+            continue;
+        }
+        any_tools = true;
+        if tools.iter().any(|(name, _kind)| name.eq_ignore_ascii_case(app)) {
+            return true;
+        }
+    }
+    if !any_tools {
+        if rules.classify.productive_apps.is_empty() {
+            return true;
+        }
+        return rules.classify.mode(Some(app)) == nudge_core::Mode::OnTask;
+    }
+    false
+}
+
 /// Is the foreground app one of the live task's tools (§6.1 sample compare)?
 ///
 /// Precedence: the task's own `task_tools` list, else the global
@@ -85,7 +127,8 @@ fn taskstart_due(state: State, in_window: bool, event: &Event) -> bool {
 fn task_list_due(state: State) -> bool {
     matches!(
         state,
-        State::CheckIn { kind: CheckInKind::OffTask, .. } | State::Choosing { .. }
+        State::CheckIn { kind: CheckInKind::OffTask | CheckInKind::OnTask, .. }
+            | State::Choosing { .. }
     )
 }
 
@@ -226,6 +269,12 @@ fn main() {
     state = s;
     run_effects(fx, now.unix, &mut res);
 
+    // §6.4 "tools since the last check-in" accumulator (PLAN-step3 §1 option A):
+    // each due sample edge pushes the probed foreground app in; any check-in
+    // resolution clears it. Runtime scratch, deliberately not core state — P2's
+    // classification screen is the consumer; P1 only fills it.
+    let mut seen_tools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
     // Message loop: wakes only on edge timer, quit event, hotkey, or tray
     // messages.
     let timer_handle = res.edge_timer.raw();
@@ -303,6 +352,9 @@ fn main() {
         // cache and is never ticked.
         if sample_due(state, now.unix, &event) {
             let app = aw_query::probe().app;
+            if let Some(a) = &app {
+                seen_tools.insert(a.clone());
+            }
             ctx.foreground_on_task =
                 foreground_on_task(&res.db, &rules, ctx.window_task_id, app.as_deref());
             if ctx.foreground_on_task {
@@ -312,14 +364,32 @@ fn main() {
                 }
             }
         }
+        // §6.4 on-task tick: at a due tick — and only there — compare the
+        // foreground app against the union of every due-window task's tools, so
+        // core can decide "drifted off everything → ask" vs "on something → stay
+        // quiet" without ever seeing an app name.
+        if ontask_due(state, now.unix, &event) {
+            let app = aw_query::probe().app;
+            if let Some(a) = &app {
+                seen_tools.insert(a.clone());
+            }
+            let rows = display_list(&tasks, &progress_map(&tasks), now.unix, &WindowCfg::default());
+            ctx.any_task_on_task = any_task_on_task(&res.db, &rules, &rows, app.as_deref());
+        }
         // §6.5 list: computed here, by `task_window::display_list`, so that core
         // can hand it straight to the render on a No without either end selecting,
         // sorting or styling anything (UI-PLAN §6.9, the one owner).
         if task_list_due(state) {
             ctx.task_rows = display_list(&tasks, &progress_map(&tasks), now.unix, &WindowCfg::default());
         }
+        let was_asking = matches!(state, State::CheckIn { .. } | State::Choosing { .. });
         let (s, fx) = next(state, &event, &ctx);
         state = s;
+        // A check-in resolved (answered, timed out, or silenced): the "since the
+        // last check-in" window restarts, so the accumulator empties with it.
+        if was_asking && !matches!(state, State::CheckIn { .. } | State::Choosing { .. }) {
+            seen_tools.clear();
+        }
         run_effects(fx, now.unix, &mut res);
     });
 
@@ -383,6 +453,7 @@ mod tests {
             checkin_at: None,
             sample_at,
             off_task_since: None,
+            ontask_at: None,
         }
     }
 
@@ -470,6 +541,63 @@ mod tests {
 
         drop(db);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // §6.4 broadened compare: on-task means "in ANY due-window task's tools",
+    // with the same never-nag fallbacks as the per-task compare.
+    #[test]
+    fn any_task_on_task_unions_due_window_tools() {
+        use nudge_core::task_window::{Row, StyleClass};
+        let row = |id: i64| Row {
+            task_id: id,
+            title: "t".into(),
+            deadline: Some(9_000),
+            logged: 0,
+            estimate: None,
+            style: StyleClass::NotStarted,
+        };
+        let (db, path) = db_with_tools(
+            "union",
+            "INSERT INTO task_tools (task_id, app_name, kind) VALUES
+                (1, 'code.exe', 'tool'), (2, 'word.exe', 'tool');",
+        );
+        let rules = rules_with_productive("\"chrome.exe\"");
+        let rows = [row(1), row(2)];
+
+        // Either task's tool counts; a stranger app does not (and the global
+        // list does NOT stand in once any task has tools).
+        assert!(any_task_on_task(&db, &rules, &rows, Some("code.exe")));
+        assert!(any_task_on_task(&db, &rules, &rows, Some("WORD.EXE")));
+        assert!(!any_task_on_task(&db, &rules, &rows, Some("game.exe")));
+        assert!(!any_task_on_task(&db, &rules, &rows, Some("chrome.exe")));
+
+        // No tools on any due task → global productive list stands in.
+        let bare_rows = [row(3)];
+        assert!(any_task_on_task(&db, &rules, &bare_rows, Some("chrome.exe")));
+        assert!(!any_task_on_task(&db, &rules, &bare_rows, Some("game.exe")));
+
+        // AW down, or nothing configured anywhere → on-task, never nag.
+        assert!(any_task_on_task(&db, &rules, &rows, None));
+        let bare = nudge_core::rules::parse(RULES_BARE).unwrap();
+        assert!(any_task_on_task(&db, &bare, &bare_rows, Some("anything.exe")));
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // The on-task probe is paid for only on a due tick in Started.
+    #[test]
+    fn ontask_due_gates_the_probe() {
+        let live = State::Started {
+            checkin_at: None,
+            sample_at: None,
+            off_task_since: None,
+            ontask_at: Some(3000),
+        };
+        assert!(ontask_due(live, 3000, &Event::EdgeTimer(3000)));
+        assert!(!ontask_due(live, 2900, &Event::EdgeTimer(2900)));
+        assert!(!ontask_due(started(None), 9999, &Event::EdgeTimer(9999)));
+        assert!(!ontask_due(live, 3000, &Event::Ack(3000)));
     }
 
     // The two "we can't tell" paths both read as on-task, so we never nag on a

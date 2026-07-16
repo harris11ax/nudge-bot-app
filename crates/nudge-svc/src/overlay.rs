@@ -240,7 +240,10 @@ fn state_tag(level: Level, mode: Mode, buttons: Buttons) -> isize {
     };
     let b = match buttons {
         Buttons::StartSnoozeSkip => 0,
-        Buttons::YesNoBreak => 1,
+        // P1 stub (PLAN-step3 A.5): the §6.4 task-list picker renders as the
+        // Yes/No/Break set — No brings up the §6.5 list, which stands in for
+        // the real picker until P2 builds it.
+        Buttons::YesNoBreak | Buttons::TaskList => 1,
     };
     l | (m << 8) | (b << 9)
 }

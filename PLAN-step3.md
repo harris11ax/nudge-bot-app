@@ -66,7 +66,7 @@ in live use. **This is the load-bearing choice — confirm before P2.**
 
 ## 2. Phases
 
-### P1 — core: `OnTask` check-in trigger + since-last-checkin accumulator plumbing
+### P1 — core: `OnTask` check-in trigger + since-last-checkin accumulator plumbing — ✅ DONE session 48 (133 tests green; `OnTask` was absent, added per A.2's VERIFY note; TaskList renders via Yes/No/Break stub per A.5)
 - `state.rs`: give `Started` an on-task check-in cadence edge. Reuse the existing `checkin_at`
   field's machinery is wrong (that's the periodic post-ack one) — add `ontask_at: Option<UnixTime>`
   to `Started`, armed from a new `[escalation] ontask_checkin_secs` (default 1800, 0 = off). In the

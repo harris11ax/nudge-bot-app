@@ -134,8 +134,12 @@ OFF-task check-in Yes/No + §6.5 task list + Take-a-break + tray Pause. Full his
   since-last-checkin = accumulate sampled apps in svc scratch; on-task cadence is a floor, user-configurable
   `[escalation] ontask_checkin_secs` (default 1800, set to seconds for testing); ordering optimises for
   fastest functional state. Execute the five phases in PLAN-step3 §2, one per session:
-  - **P1** core: `CheckInKind::OnTask` goes live (the dead variant), `Started.ontask_at` edge collapsed into
-    `arm_started`, `ScheduleCtx.any_task_on_task` broadened gate, `ontask_checkin_secs` rule.
+  - **P1 ✅ (2026-07-16, session 48)** core: `CheckInKind::OnTask` live, `Started.ontask_at` third runtime
+    edge in `arm_started`'s 3-way merge (floor semantics: on-task tick = silent re-arm), `ScheduleCtx.
+    {any_task_on_task,ontask_secs}`, `[escalation] ontask_checkin_secs` (default 1800 — ON for existing
+    configs, silent unless drifted). svc: `ontask_due` gate, `any_task_on_task()` union compare,
+    `seen_tools` accumulator (fills at probes, clears on check-in resolution — P2 consumes),
+    `Buttons::TaskList` rendered via Yes/No/Break stub (real picker = P2). 133 tests green. Not committed.
   - **P2** svc: classification screen — `Effect::ShowClassify`/`Event::Classify`, `classify.rs` overlay,
     routes each accumulated tool → task tool-list / global not-tool / task-scoped ignore.
   - **P3** nudge-app: §6.2 searchable chip selector + Settings Tools/Style tabs (DB model already exists).

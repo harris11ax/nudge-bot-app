@@ -258,3 +258,19 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
   break→expiry→resumed. Instrumentation reverted; 122/122 workspace tests green.
 - **Still unexercised**: tray Pause/Resume (real tray-menu click required; synthetic input can't reach
   it) — fold into Tier B's live pass. Not committed.
+
+## Session 48 (2026-07-16) — Step 3 / PLAN-step3 P1: §6.4 on-task check-in core + svc plumbing
+- **Core (`nudge-core`)**: `CheckInKind::OnTask` + `Buttons::TaskList` + `EdgeKind::OnTaskCheckIn`;
+  `Started` gains `ontask_at` (third runtime edge), armed on Ack/Yes/resume, cleared on Skip;
+  `arm_started` 3-way min-merge keeps the single-armed-timer invariant. Tick due + `!any_task_on_task`
+  → `CheckIn{OnTask}`; on-task at the tick → silent re-arm (floor semantics), co-due sample bumped.
+  `ScheduleCtx` gains `any_task_on_task` (default true — no signal never nags) + `ontask_secs`.
+- **Rules**: `[escalation] ontask_checkin_secs` (default 1800, 0 disables, negative rejected),
+  `Escalation::ontask()`. NOTE: defaults ON — existing configs now arm a 30-min on-task tick (silent
+  unless drifted off every due task's tools).
+- **svc**: `ontask_due` gate + `any_task_on_task()` (union of `task_tools` across `display_list`
+  due-window rows; fallback global productive_apps, else true); `Buttons::TaskList` renders as the
+  Yes/No/Break stub (P1 stand-in per PLAN A.5 — real picker is P2); `task_list_due` includes
+  `CheckIn{OnTask}`; §1-option-A accumulator `seen_tools: BTreeSet<String>` fills at sample/ontask
+  probes, clears on check-in resolution (P2 consumes it).
+- 133 workspace tests green (was 122; +9 core state, +1 rules, +1 integration adjusted, +2 svc). Not committed.

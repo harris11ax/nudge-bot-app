@@ -69,6 +69,12 @@ pub struct Escalation {
     /// fires (§6.5). Measured from the first off-task sample, so with the default
     /// cadence it takes two consecutive off-task samples to cross.
     pub off_task_secs: i64,
+    /// §6.4 on-task check-in floor cadence in seconds; 0 disables it. A tick
+    /// that lands while the user is on ANY due-window task's tools is silently
+    /// skipped, so this is the *minimum* spacing between prompts, not a
+    /// metronome. User-configurable (Settings, Tier B P3); set to a small
+    /// positive number of seconds in a scratch config to test.
+    pub ontask_checkin_secs: i64,
     /// How long "Take a break" from the §6.5 check-in silences everything.
     pub break_secs: i64,
     /// How long a tray Pause silences everything (§6.6).
@@ -85,6 +91,7 @@ impl Default for Escalation {
             checkin_after_secs: 0,
             sample_secs: 0,
             off_task_secs: 5 * 60,
+            ontask_checkin_secs: 30 * 60,
             break_secs: 10 * 60,
             pause_secs: 30 * 60,
         }
@@ -111,6 +118,13 @@ impl Escalation {
     /// armed at all (§6.1 zero-polling guarantee).
     pub fn sample(&self) -> Option<i64> {
         (self.sample_secs > 0).then_some(self.sample_secs)
+    }
+
+    /// §6.4 on-task check-in cadence as the state machine wants it: `None` when
+    /// disabled, in which case `Started` never carries an `ontask_at` and no
+    /// on-task edge can be armed at all.
+    pub fn ontask(&self) -> Option<i64> {
+        (self.ontask_checkin_secs > 0).then_some(self.ontask_checkin_secs)
     }
 }
 
@@ -187,6 +201,7 @@ pub fn parse(toml_src: &str) -> Result<Rules, RulesError> {
         || esc.snooze_secs < 0
         || esc.sample_secs < 0
         || esc.off_task_secs < 0
+        || esc.ontask_checkin_secs < 0
         || esc.break_secs < 0
         || esc.pause_secs < 0
     {
@@ -265,6 +280,15 @@ text = "t"
         assert_eq!(r.escalation.checkin(), Some(1800));
         // Unspecified ladder fields keep their defaults.
         assert_eq!(r.escalation.ladder().l1_after_secs, 300);
+    }
+
+    #[test]
+    fn ontask_checkin_defaults_on_and_zero_disables() {
+        let r = parse(OK).unwrap();
+        assert_eq!(r.escalation.ontask(), Some(1800)); // §6.4: 30-min floor by default
+        let src = format!("{OK}\n[escalation]\nontask_checkin_secs = 0\n");
+        assert_eq!(parse(&src).unwrap().escalation.ontask(), None);
+        assert!(parse(&format!("{OK}\n[escalation]\nontask_checkin_secs = -1\n")).is_err());
     }
 
     #[test]
