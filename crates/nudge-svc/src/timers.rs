@@ -87,6 +87,10 @@ pub enum LoopSignal {
     /// which lives in rules — the loop deliberately doesn't hold them, so main
     /// stamps the fallback on. Break's duration is rules-only, same deal.
     Pause(UnixTime, Option<i64>),
+    /// The submenu's "Custom" item (step 5): duration is
+    /// `[escalation] custom_pause_secs`, same rules-side stamping as `Pause`'s
+    /// `None` case.
+    PauseCustom(UnixTime),
     Break(UnixTime),
 }
 
@@ -131,6 +135,9 @@ pub fn message_loop(
                     on_signal(LoopSignal::Core(Event::HotkeyToggle(local_now().unix)))
                 }
                 TrayCmd::Pause(secs) => on_signal(LoopSignal::Pause(local_now().unix, secs)),
+                TrayCmd::PauseCustom => {
+                    on_signal(LoopSignal::PauseCustom(local_now().unix))
+                }
                 TrayCmd::Resume => {
                     on_signal(LoopSignal::Core(Event::Resume(local_now().unix)))
                 }

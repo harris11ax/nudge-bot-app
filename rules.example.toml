@@ -51,6 +51,9 @@ break_secs = 600
 # real pause: no window opens and no check-in fires until it expires, or until
 # you pick Tray > Resume.
 pause_secs = 1800
+# Tray > Pause > Custom uses this duration instead. Edit it and Tray > Reload
+# rules to pick a one-off pause length without restarting nudge-svc.
+custom_pause_secs = 3600
 
 [classify]
 # On/off-task mode pick (UI-PLAN §1). When a nudge window opens, nudge-svc asks

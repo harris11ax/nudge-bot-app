@@ -79,6 +79,11 @@ pub struct Escalation {
     pub break_secs: i64,
     /// How long a tray Pause silences everything (§6.6).
     pub pause_secs: i64,
+    /// Duration for the tray Pause submenu's "Custom" item (§6.6 step 5): a
+    /// free-input surface would need a new Win32 dialog, so instead the user
+    /// edits this value in rules.toml and picks "Custom" from the existing
+    /// submenu — no UI beyond a menu item, reusing the live "Reload rules" path.
+    pub custom_pause_secs: i64,
 }
 
 impl Default for Escalation {
@@ -94,6 +99,7 @@ impl Default for Escalation {
             ontask_checkin_secs: 30 * 60,
             break_secs: 10 * 60,
             pause_secs: 30 * 60,
+            custom_pause_secs: 60 * 60,
         }
     }
 }
@@ -204,6 +210,7 @@ pub fn parse(toml_src: &str) -> Result<Rules, RulesError> {
         || esc.ontask_checkin_secs < 0
         || esc.break_secs < 0
         || esc.pause_secs < 0
+        || esc.custom_pause_secs < 0
     {
         return Err(RulesError::Invalid("escalation: negative duration".into()));
     }
@@ -270,6 +277,16 @@ text = "t"
         assert_eq!(r.escalation.off_task_secs, 600);
         // A negative cadence is rejected like every other duration.
         assert!(parse(&format!("{OK}\n[escalation]\nsample_secs = -1\n")).is_err());
+    }
+
+    #[test]
+    fn custom_pause_secs_defaults_and_overrides() {
+        let r = parse(OK).unwrap();
+        assert_eq!(r.escalation.custom_pause_secs, 3600);
+        let src = format!("{OK}\n[escalation]\ncustom_pause_secs = 900\n");
+        let r = parse(&src).unwrap();
+        assert_eq!(r.escalation.custom_pause_secs, 900);
+        assert!(parse(&format!("{OK}\n[escalation]\ncustom_pause_secs = -1\n")).is_err());
     }
 
     #[test]

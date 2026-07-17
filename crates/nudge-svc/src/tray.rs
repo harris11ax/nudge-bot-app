@@ -8,7 +8,9 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 /// The §6.6 Pause submenu durations, label ↔ seconds. "Default" carries `None`
 /// and falls back to `[escalation] pause_secs` (the pre-P4 single-item
-/// behaviour); a free-input Custom duration is deferred to the Settings UI.
+/// behaviour). "Custom" (step 5) falls back to `[escalation] custom_pause_secs`
+/// the same way — no free-text input surface exists in this Win32 app, so the
+/// duration is edited in rules.toml and picked up live via Tray > Reload rules.
 const PAUSE_CHOICES: [(&str, i64); 5] = [
     ("20 minutes", 20 * 60),
     ("30 minutes", 30 * 60),
@@ -24,6 +26,9 @@ pub enum TrayCmd {
     /// in main, so the loop hands the choice up rather than building the core
     /// event itself.
     Pause(Option<i64>),
+    /// The submenu's "Custom" item: falls back to `[escalation]
+    /// custom_pause_secs` (step 5 — see [`PAUSE_CHOICES`] doc comment).
+    PauseCustom,
     /// End a pause/break early.
     Resume,
     Reload,
@@ -37,6 +42,8 @@ pub struct Tray {
     pause_ids: Vec<MenuId>,
     /// The "Default (rules)" submenu item → `TrayCmd::Pause(None)`.
     pause_default: MenuId,
+    /// The "Custom (rules)" submenu item → `TrayCmd::PauseCustom`.
+    pause_custom: MenuId,
     resume: MenuId,
     reload: MenuId,
     quit: MenuId,
@@ -59,6 +66,9 @@ impl Tray {
         let default_item = MenuItem::new("Default (rules)", true, None);
         pause.append(&default_item).expect("append pause default");
         let pause_default = default_item.id().clone();
+        let custom_item = MenuItem::new("Custom (rules)", true, None);
+        pause.append(&custom_item).expect("append pause custom");
+        let pause_custom = custom_item.id().clone();
         let resume = MenuItem::new("Resume", true, None);
         let reload = MenuItem::new("Reload rules", true, None);
         let quit = MenuItem::new("Quit", true, None);
@@ -85,6 +95,7 @@ impl Tray {
             toggle: toggle.id().clone(),
             pause_ids,
             pause_default,
+            pause_custom,
             resume: resume.id().clone(),
             reload: reload.id().clone(),
             quit: quit.id().clone(),
@@ -111,6 +122,8 @@ impl Tray {
             Some(TrayCmd::Toggle)
         } else if ev.id == self.pause_default {
             Some(TrayCmd::Pause(None))
+        } else if ev.id == self.pause_custom {
+            Some(TrayCmd::PauseCustom)
         } else if ev.id == self.resume {
             Some(TrayCmd::Resume)
         } else if ev.id == self.reload {

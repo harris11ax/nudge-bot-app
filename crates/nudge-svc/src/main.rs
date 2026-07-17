@@ -339,6 +339,9 @@ fn main() {
             timers::LoopSignal::Pause(t, secs) => {
                 Event::PauseFor(t, secs.unwrap_or(rules.escalation.pause_secs))
             }
+            timers::LoopSignal::PauseCustom(t) => {
+                Event::PauseFor(t, rules.escalation.custom_pause_secs)
+            }
             timers::LoopSignal::Break(t) => Event::BreakFor(t, rules.escalation.break_secs),
             timers::LoopSignal::Reload => {
                 // Re-read rules.toml from disk. On any read/parse error, keep the

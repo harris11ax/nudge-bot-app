@@ -3,10 +3,11 @@
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below
      for branch/commit/PR conventions now that this is a real remote, not just a local tree. -->
 
-Last completed: session 56 — Step 4 **DONE** (deadline-only tasks now get a `DEFAULT_TASK_MINUTES`
-(09:00) fallback window in `schedule::Win::from_task`; undated-once suggestions confirmed to already
-degrade gracefully, left as planner-only rows by design; 153 tests green). Next: step 5 (Sonnet —
-custom pause duration input). Full history: [HISTORY.md](HISTORY.md).
+Last completed: session 57 — Step 5 **DONE** (tray Pause submenu gains a "Custom (rules)" item backed
+by a new `[escalation] custom_pause_secs` rules.toml field, default 3600s; no free-text input surface
+exists in this Win32 app, so the duration is edited in rules.toml and picked up live via the existing
+Tray > Reload rules path — 154 tests green). Next: step 6 (Opus — nudge-draft LLM title/time pass) is
+the only step left; all Sonnet steps done. Full history: [HISTORY.md](HISTORY.md).
 
 ## Next steps
 - [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
@@ -217,9 +218,18 @@ custom pause duration input). Full history: [HISTORY.md](HISTORY.md).
   `deadline_only_weekly_task_uses_default_minutes`, `deadline_only_once_task_uses_default_minutes`).
   153 workspace tests green. Not committed.
 
-- [ ] **5 — Custom pause duration input** | **Sonnet** | ~1h
-  Deferred from P4: tray submenu offers fixed durations only. Add a free-input surface —
-  likely a Settings field or small prompt window.
+- [x] **5 — Custom pause duration input** | **Sonnet** | DONE session 57.
+  No native text-entry control exists anywhere in nudge-svc (checked: no `EDIT` child window,
+  no `MessageBox`/`DialogBox` usage) and `overlay.rs`'s layered window is a display+click surface,
+  not an input one — building a real Win32 input dialog was out of scope for ~1h. Instead: new
+  `[escalation] custom_pause_secs` rules.toml field (default 3600s, validated alongside the other
+  durations in `rules::parse`); tray Pause submenu gained a "Custom (rules)" item (`tray.rs`) → new
+  `TrayCmd::PauseCustom` → `LoopSignal::PauseCustom` (`timers.rs`) → `Event::PauseFor(t,
+  rules.escalation.custom_pause_secs)` (`main.rs`), same stamping pattern as the existing
+  "Default (rules)" item. User sets the duration by editing rules.toml and clicking Tray > Reload
+  rules — no restart needed. 154 workspace tests green (up from 153; +1 `rules.rs` test for the
+  new field's default/override/negative-rejection). Not committed. Not live-driven (config +
+  submenu plumbing only, same risk class as the already-verified Default item).
 
 - [ ] **6 — nudge-draft LLM title/time pass** | **Opus** | ~1d
   Deferred from 10e: needs the binary crate split into lib+bin first, then an LLM pass that

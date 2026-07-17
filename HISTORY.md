@@ -412,3 +412,26 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
 - `cargo test --workspace`: 153 passed, 0 failed (nudge-core 102 + core_integration 1 + nudge-draft 9 +
   nudge-svc 41; nudge-ctl and doc-tests contribute 0 either way). Compiles the whole tree, so this
   doubles as the build check — no separate `cargo build --workspace` run. Not committed.
+
+## Session 57 (2026-07-17) — Step 5: custom pause duration input
+- Investigated a native text-input surface first: `nudge-svc` has none anywhere (no `EDIT`-class
+  child window, no `MessageBox`/`DialogBox` call in the whole crate), and `overlay.rs`'s layered
+  strip (`Anchor`, used for the prompt/check-in/task-list windows) is a click-only display surface —
+  building a real free-text Win32 dialog was judged out of scope for a ~1h Sonnet step.
+- Went with the config-driven alternative flagged in `PLAN-step3.md` D.2 and `tray.rs`'s own doc
+  comment: a new `[escalation] custom_pause_secs` rules.toml field (`rules.rs`, default 3600s,
+  validated alongside the other durations — negative rejected same as `pause_secs` etc.), and a
+  "Custom (rules)" item appended to the existing tray Pause submenu (`tray.rs`) parallel to the
+  pre-existing "Default (rules)" item. New plumbing, mirroring the Default item's path exactly:
+  `TrayCmd::PauseCustom` (tray.rs) → `LoopSignal::PauseCustom(UnixTime)` (timers.rs) →
+  `Event::PauseFor(t, rules.escalation.custom_pause_secs)` (main.rs). The user sets a one-off pause
+  length by editing rules.toml and clicking Tray > Reload rules — no restart, reuses the live-reload
+  path that already exists for every other rules.toml edit.
+- `rules.example.toml` documents the new field next to `pause_secs`.
+- New test: `rules.rs::custom_pause_secs_defaults_and_overrides` (default 3600, override to 900,
+  rejects negative) — same pattern as the other escalation-field tests.
+- `cargo test --workspace`: 154 passed, 0 failed (nudge-core 103, +1 from this session; core_integration
+  1 + nudge-draft 9 + nudge-svc 41 unchanged). `cargo build --workspace` clean (2 pre-existing warnings,
+  unrelated: `hotkey::Trigger` never used, `persist::app_class` never used). Not committed. Not
+  live-driven — config parsing + tray-menu-id plumbing only, same risk class as the already
+  live-verified "Default (rules)" item (session 54), so static verify was judged sufficient.
