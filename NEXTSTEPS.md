@@ -3,10 +3,9 @@
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below
      for branch/commit/PR conventions now that this is a real remote, not just a local tree. -->
 
-Last completed: session 53 — Step 1 **DONE** (fixed session-52 review findings: task_id carry through
-CheckIn/Choosing/Paused, re-Pause was_started preservation, logged_minutes sub-minute accrual). 148
-workspace tests green, not committed. Next: step 2 (Sonnet — verify tray Pause submenu with a real
-click). Full history: [HISTORY.md](HISTORY.md).
+Last completed: session 54 — Step 2 **DONE** (verified tray Pause submenu with a real tray click:
+paused/resumed edges confirmed clean in scratch sessions.db, no stray PauseExpiry). Next: step 3
+(Sonnet — renderers consume meta.style_bands). Full history: [HISTORY.md](HISTORY.md).
 
 ## Next steps
 - [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
@@ -181,10 +180,14 @@ click). Full history: [HISTORY.md](HISTORY.md).
   now accrue a carried-seconds remainder instead of truncating to 0 minutes per tick.
   148 workspace tests green (up from 145), builds clean. Not committed.
 
-- [ ] **2 — Verify tray Pause submenu with a real tray click** | **Sonnet** | ~30m
-  Unexercised since P4 (synthetic input can't reach the tray menu). Step 2b scratch-config method +
-  user clicks the tray: pick 20m → single `PauseExpiry` edge at +20m, grey paused icon, Resume works.
-  Do AFTER step 1 so the re-Pause fix is also covered.
+- [x] **2 — Verify tray Pause submenu with a real tray click** | **Sonnet** | DONE session 54.
+  Reused the Step 2b scratch-config dir (`%TEMP%\claude\nudge-scratch\nudge-bot`, hotkey moved to
+  `ctrl+alt+shift+Y` to dodge the machine-wide collision noted in session 45). Launched
+  `nudge-svc.exe` via PowerShell with `$env:LOCALAPPDATA` pointed at the scratch dir (Bash's `cmd //c
+  start` failed with "Access is denied" — use PowerShell `Start-Process` for this on this machine).
+  User right-clicked the real tray icon → Pause → 20m: icon went grey (paused), Resume appeared.
+  `outcomes` table confirmed a single `paused` edge, then a single `resumed` edge after clicking
+  Resume — no stray/duplicate `PauseExpiry`. Tier B/C is now fully live-verified end-to-end.
 
 - [ ] **3 — Renderers consume `meta.style_bands`** | **Sonnet** | ~1h
   Deferred from P3: StyleTab writes band colors to `meta.style_bands` but svc tasklist/overlay renderers
