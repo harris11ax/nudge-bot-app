@@ -28,31 +28,7 @@ fn client_config_path() -> PathBuf {
 }
 
 pub fn load_client_config() -> Option<ClientConfig> {
-    let path = client_config_path();
-    let read = std::fs::read(&path);
-    // TEMP DIAG: record what this process actually resolves, so a launch-context
-    // difference (elevation, redirected profile, empty env) is visible. Written
-    // to the system temp dir, which does not depend on LOCALAPPDATA.
-    {
-        use std::io::Write as _;
-        let localappdata = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "<unset>".into());
-        let outcome = match &read {
-            Ok(b) => format!("read ok, {} bytes", b.len()),
-            Err(e) => format!("read ERR: {e}"),
-        };
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(std::env::temp_dir().join("nudge-google-debug.log"))
-        {
-            let _ = writeln!(
-                f,
-                "google_status: LOCALAPPDATA={localappdata} path={} -> {outcome}",
-                path.display()
-            );
-        }
-    }
-    let bytes = read.ok()?;
+    let bytes = std::fs::read(client_config_path()).ok()?;
     parse_client_config(&bytes)
 }
 

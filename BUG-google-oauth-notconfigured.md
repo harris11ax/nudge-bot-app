@@ -1,3 +1,30 @@
+# BUG: Google tab shows "No OAuth client configured" on `.vbs` launch — RESOLVED
+
+## RESOLUTION (2026-07-17)
+Root cause **confirmed**: stale WebView2 cache. The app's `EBWebView\Default\Cache`
+and `Code Cache` were dated Jul 12 06:54 while the exe/dist rebuilt Jul 17 18:18–18:23.
+WebView2 served a pre-fix JS chunk (with `not_configured` as the default) from its
+Code Cache; the fresh backend (which never returns `NotConfigured` when the client
+file reads OK) was correct all along.
+
+Fixes applied:
+- Cleared the stale `Cache` + `Code Cache` (one-time remediation).
+- **Prevention:** added `--disable-http-cache` to the window's
+  `additionalBrowserArgs` in `src-tauri/tauri.conf.json` (kept Tauri's default
+  `--disable-features=...` args, since setting this key overrides them). App serves
+  only tiny embedded local assets, so disabling the WebView2 HTTP cache has no cost
+  and stops any future build from being shadowed by a cached chunk.
+  (Note: the sanctioned `app.security.headers` config can't set `Cache-Control` —
+  Tauri only allows a fixed allowlist of header names — and `on_web_resource_request`
+  would require building the window in code instead of via config, so the browser-arg
+  route is the minimal fix.)
+- Removed the temp diagnostic in `load_client_config()` and deleted the debug log.
+- Rebuilt (`npx tauri build`), exe 19:12.
+
+Everything below is the original investigation, kept for reference.
+
+---
+
 # BUG: Google tab shows "No OAuth client configured" on `.vbs` launch
 
 ## Symptom
