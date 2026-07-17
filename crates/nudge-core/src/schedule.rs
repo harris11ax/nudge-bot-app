@@ -25,6 +25,12 @@ const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 /// the escalation ladder room to run before `WindowEnd` drops the prompt.
 const TASK_WINDOW_MINUTES: u32 = 30;
 
+/// Fallback start time-of-day (minutes since local midnight, 09:00) for a task
+/// with no explicit `minutes` cue — a deadline-only task (Weekly with no
+/// time-of-day) or a `Recur::Once` task whose deadline instant is date-only.
+/// Gives such tasks a real window instead of silently never firing (step 4).
+const DEFAULT_TASK_MINUTES: u32 = 9 * 60;
+
 /// A nudge window normalized for scheduling, independent of its source (a rules
 /// `[[nudge]]` block or a recurring `tasks` row). `active[i]` marks weekday
 /// `i` (0 = mon .. 6 = sun); `start`/`end` are minutes since local midnight
@@ -73,16 +79,18 @@ impl Win {
         }
     }
 
-    /// Normalize a `tasks` row, or `None` when it can't yet drive a window:
-    /// a deadline-only task (`minutes == None`, no time-of-day cue) or a
-    /// `Recur::Once` task (no weekday anchor — one-shot firing needs a
-    /// completion flag the read-only svc can't set. A `Recur::Once` task with a
-    /// deadline is date-anchored instead: it fires on the deadline's calendar
-    /// date and never again (the date passes), so no completion flag is needed.
-    /// A `Recur::Once` task with no deadline stays deferred (nothing to anchor
-    /// the single firing to). Weekly tasks map directly, like a `[[nudge]]` block.
+    /// Normalize a `tasks` row, or `None` when it can't yet drive a window: a
+    /// `Recur::Once` task with no deadline (no weekday anchor — one-shot firing
+    /// needs a completion flag the read-only svc can't set, and there's no date
+    /// to anchor a single firing to either; stays a planner-only row). A
+    /// `Recur::Once` task with a deadline is date-anchored instead: it fires on
+    /// the deadline's calendar date and never again (the date passes), so no
+    /// completion flag is needed. Weekly tasks map directly, like a `[[nudge]]`
+    /// block. Either kind may be missing a `minutes` time-of-day cue (a
+    /// deadline-only task, or a deadline whose only meaningful part is the
+    /// date) — that falls back to [`DEFAULT_TASK_MINUTES`] rather than
+    /// producing no window at all (step 4).
     fn from_task(t: &Task) -> Option<Win> {
-        let start = t.minutes?;
         let (active, on_date) = match &t.recur {
             Recur::Weekly(days) => {
                 let mut active = [false; 7];
@@ -93,6 +101,7 @@ impl Win {
             }
             Recur::Once => ([false; 7], Some(t.deadline?)),
         };
+        let start = t.minutes.unwrap_or(DEFAULT_TASK_MINUTES);
         Some(Win {
             active,
             on_date,
@@ -312,16 +321,45 @@ text = "work"
         );
     }
 
-    // A deadline-only task (no time-of-day) and a Once task with no deadline
-    // (nothing to anchor the single firing to) contribute no edges.
+    // A Once task with no deadline has nothing to anchor the single firing to
+    // and contributes no edge — stays a planner-only row.
     #[test]
-    fn deadline_only_and_undated_once_skipped() {
+    fn undated_once_skipped() {
         let empty = parse("[anchor]\ndefault_text = \"idle\"\n").unwrap();
         let undated_once = task(Some(9 * 60), Recur::Once, "call mum"); // deadline None
-        let deadline_only = task(None, Recur::Weekly(vec![0]), "report");
-        let ctx = context_with_tasks(&empty, &[undated_once, deadline_only], at(0, 9 * 60 + 10));
+        let ctx = context_with_tasks(&empty, std::slice::from_ref(&undated_once), at(0, 9 * 60 + 10));
         assert!(!ctx.in_window);
         assert_eq!(ctx.next_edge, None);
+    }
+
+    // A deadline-only task (no `minutes` time-of-day cue) still gets a window:
+    // it falls back to DEFAULT_TASK_MINUTES (09:00) rather than never firing.
+    #[test]
+    fn deadline_only_weekly_task_uses_default_minutes() {
+        let empty = parse("[anchor]\ndefault_text = \"idle\"\n").unwrap();
+        let t = task(None, Recur::Weekly(vec![0]), "report");
+
+        // Monday 09:10 — inside the fallback 09:00-09:30 window.
+        let ctx = context_with_tasks(&empty, std::slice::from_ref(&t), at(0, 9 * 60 + 10));
+        assert!(ctx.in_window);
+        assert_eq!(ctx.window_text, "report");
+        assert_eq!(
+            ctx.next_edge,
+            Some(Edge { at: (9 * 60 + 30) as i64 * 60, kind: EdgeKind::WindowEnd })
+        );
+    }
+
+    // A dated-but-time-of-day-less Once task (deadline set, minutes None) also
+    // falls back to DEFAULT_TASK_MINUTES and fires on the deadline's date.
+    #[test]
+    fn deadline_only_once_task_uses_default_minutes() {
+        let empty = parse("[anchor]\ndefault_text = \"idle\"\n").unwrap();
+        let mut once = task(None, Recur::Once, "renew passport");
+        once.deadline = Some(3 * 3600); // Monday, date-only deadline
+
+        let ctx = context_with_tasks(&empty, std::slice::from_ref(&once), at(0, 9 * 60 + 10));
+        assert!(ctx.in_window);
+        assert_eq!(ctx.window_text, "renew passport");
     }
 
     // A Once task dated today fires: its window opens at `minutes` on the

@@ -3,9 +3,10 @@
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below
      for branch/commit/PR conventions now that this is a real remote, not just a local tree. -->
 
-Last completed: session 55 — Step 3 **DONE** (svc tasklist renderer now reads `meta.style_bands`,
-falls back to built-in colors when unset; 153 tests green, not live-driven). Next: step 4 (Sonnet —
-deadline-only tasks + undated-once suggestions). Full history: [HISTORY.md](HISTORY.md).
+Last completed: session 56 — Step 4 **DONE** (deadline-only tasks now get a `DEFAULT_TASK_MINUTES`
+(09:00) fallback window in `schedule::Win::from_task`; undated-once suggestions confirmed to already
+degrade gracefully, left as planner-only rows by design; 153 tests green). Next: step 5 (Sonnet —
+custom pause duration input). Full history: [HISTORY.md](HISTORY.md).
 
 ## Next steps
 - [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
@@ -202,11 +203,19 @@ deadline-only tasks + undated-once suggestions). Full history: [HISTORY.md](HIST
   a live check-in list + a Style-tab edit in the same session — static verify only: unit tests cover
   parse/fallback/clamp).
 
-- [ ] **4 — Deadline-only tasks (no time-of-day) + undated-once suggestions** | **Sonnet** | ~2h
-  Deferred from 10e: a once task with a deadline date but no `minutes` produces no window
-  (`Win::from_task` returns None). Design a sensible default window; also let
-  `accept_suggested_trigger` handle undated suggestions. (Escalate to Opus if scheduling semantics
-  get contentious.)
+- [x] **4 — Deadline-only tasks (no time-of-day) + undated-once suggestions** | **Sonnet** | DONE session 56.
+  `schedule::Win::from_task` (`crates/nudge-core/src/schedule.rs`) now falls back to a new
+  `DEFAULT_TASK_MINUTES` (09:00) whenever `t.minutes` is `None`, applied after the existing
+  `Once`-without-deadline `?` short-circuit — so a deadline-only Weekly task and a Once task whose
+  deadline is date-only both get a real window instead of silently never firing.
+  `accept_suggested_trigger` (nudge-app `db.rs`) needed no change: it already sets `minutes: None` for
+  an undated suggestion, and that now flows into the same fallback rather than dead-ending.
+  Deliberately scoped out (flagged, not guessed, per the escalate-if-contentious note): a `Recur::Once`
+  task with **no deadline** still produces no window — there's no calendar date to anchor a one-shot
+  firing to, and firing it every day would break "once" semantics. Stays a planner-only row.
+  3 schedule.rs tests updated/added (`undated_once_skipped`,
+  `deadline_only_weekly_task_uses_default_minutes`, `deadline_only_once_task_uses_default_minutes`).
+  153 workspace tests green. Not committed.
 
 - [ ] **5 — Custom pause duration input** | **Sonnet** | ~1h
   Deferred from P4: tray submenu offers fixed durations only. Add a free-input surface —

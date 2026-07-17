@@ -389,3 +389,26 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
   clean (only pre-existing warnings). Not live-driven: verifying a visible band-color change needs a
   live check-in list up at the same time as a Style-tab edit in the running app, which wasn't set up
   this session — static/unit coverage only. Not committed.
+
+## Session 56 (2026-07-17) — Step 4: deadline-only tasks + undated-once suggestions
+- `schedule::Win::from_task` previously bailed (`t.minutes?`) whenever a task had no `minutes`
+  time-of-day, so a deadline-only task (Weekly with no cue, or a Once task whose deadline only encodes
+  a date) never produced a window at all. Added `DEFAULT_TASK_MINUTES` (09:00) as the fallback: `start =
+  t.minutes.unwrap_or(DEFAULT_TASK_MINUTES)`, applied after the `Once`-without-deadline `?` short-circuit
+  (that case still correctly returns `None` — no date to anchor a one-shot firing to, stays a
+  planner-only row, unchanged from before).
+- `accept_suggested_trigger` (nudge-app `db.rs`) already degrades gracefully for an undated suggestion
+  (`deadline.map(local_minutes_of_day)` → `minutes: None`), so no change was needed there — the fix in
+  `schedule.rs` is what makes the resulting deadline-only task actually fire instead of silently never
+  scheduling. Confirmed by reading through, not by touching the file.
+  Left alone by design: `Recur::Once` with **no deadline** (e.g. an undated Gmail suggestion accepted
+  as-is) still stays a planner-only row with no window — there is no calendar date to anchor a one-shot
+  firing to, and firing it daily would break "once" semantics. Considered contentious enough to flag
+  rather than guess; scoped out of this step.
+- Tests: replaced `deadline_only_and_undated_once_skipped` (now-stale expectation) with
+  `undated_once_skipped` (unchanged behavior, isolated) + two new tests —
+  `deadline_only_weekly_task_uses_default_minutes` and `deadline_only_once_task_uses_default_minutes` —
+  covering the new fallback for both `Recur` variants.
+- `cargo test --workspace`: 153 passed, 0 failed (nudge-core 102 + core_integration 1 + nudge-draft 9 +
+  nudge-svc 41; nudge-ctl and doc-tests contribute 0 either way). Compiles the whole tree, so this
+  doubles as the build check — no separate `cargo build --workspace` run. Not committed.
