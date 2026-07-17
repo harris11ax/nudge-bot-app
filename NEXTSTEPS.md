@@ -1,284 +1,70 @@
 # NEXTSTEPS.md
-<!-- Boundary: forward-looking task queue only. Session history lives in HISTORY.md.
-     Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below
-     for branch/commit/PR conventions now that this is a real remote, not just a local tree. -->
+<!-- Boundary: forward-looking task queue only. Completed-step detail lives in HISTORY.md.
+     Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below. -->
 
-Last completed: session 57 — Step 5 **DONE** (tray Pause submenu gains a "Custom (rules)" item backed
-by a new `[escalation] custom_pause_secs` rules.toml field, default 3600s; no free-text input surface
-exists in this Win32 app, so the duration is edited in rules.toml and picked up live via the existing
-Tray > Reload rules path — 154 tests green). Next: step 6 (Opus — nudge-draft LLM title/time pass) is
-the only step left; PARKED by user as a future feature (2026-07-17) — tasks uploaded manually / via
-spreadsheet, so connector auto-drafting isn't needed. Full history: [HISTORY.md](HISTORY.md).
+Last completed: session 57 — Step 5 (custom pause duration via `[escalation] custom_pause_secs`).
+Next open: **step 7** (CSV bulk task import — planned, [PLAN-csv-import.md](PLAN-csv-import.md)) and
+**step 8** (fix Gmail scan 403). Step 6 (nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
 
-## Next steps
-- [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
-  `gmail.rs` (gmail.readonly) + `connectors.rs`: GCal events + email candidates → suggested_triggers,
-  deduped vs tasks.gcal_event_id + pending. nudge-draft LLM title/time pass DEFERRED (binary crate, needs
-  lib split). END-TO-END UNBLOCKED (feature/once-task-firing): `Recur::Once` tasks now fire via a
-  date-anchor — `schedule::Win` carries `on_date` (the deadline instant); a once task is live only on the
-  day whose local midnight..+24h contains its deadline, so it fires exactly once (the date passes) with NO
-  completion flag needed, and past-dated once tasks contribute no future edge. `accept_suggested_trigger`
-  derives `minutes` (local time-of-day) from the deadline via chrono so the synthesized window opens at the
-  right wall-clock time. Deadline-only tasks (no time-of-day) and undated-once suggestions remain deferred.
+## Open steps
+- [ ] **7 — CSV bulk task import** | **Sonnet** | ~1–1.5d | **PLANNED → [PLAN-csv-import.md](PLAN-csv-import.md)**
+  Bulk-add tasks from a `.csv`. Flow: user dumps a text task list → asks Claude/Gemini to shape it into
+  the canonical CSV → uploads it → an intermediate **filter screen** flags each row import-ready vs. broken
+  (required fields present/parseable), user edits/toggles → Import writes all included rows to `tasks`.
+  Reuses the existing ingestion contract (row → `NewTaskForm` → `Task` → `Db::insert`, same path as
+  `add_task`); mirrors the `suggested_triggers` staging→accept pattern. App-process only — **no svc change,
+  no polling, no in-app LLM/network** (the LLM shaping happens outside nudge-bot). Canonical header:
+  `title,description,deadline,time_of_day,recur,task_type,estimate_minutes,mode`. Must ship a
+  **"Download blank template.csv"** button (header-only file to hand off to the LLM) and a "Copy LLM prompt"
+  button. Phases (one per session): **P1** pure `csv_import.rs` parser + validation (unit-testable, no I/O);
+  **P2** tauri cmds `validate_csv_import`/`import_tasks` (single transaction + ONE reload for the whole batch,
+  not per row) + `generate_handler!` registration; **P3** `CsvImport.svelte` filter screen + Sidebar entry +
+  template/prompt buttons; **P4** unit tests + live drive a mixed valid/broken CSV end-to-end. Out of scope:
+  `.xlsx` ingestion, column-remap wizard.
 
-- [x] **1 — 11–12 — UI addendum (task tools, check-in flow, dynamic deadline windows, style settings)** | **Opus** |
-  DONE session 43 — the Step-1 slice (PLAN-step1 Phases 1–4) is complete. Tier B/C remain deferred; see
-  "Next up" below for what they became.
-  Details in NEXTSTEPS.md §11–§12 (task-tool selector, AW-usage sort, ON/OFF check-in popups,
-  tray Pause menu, calendar-event auto-pause, GCal refresh caps). Budget: 5-min AW sampling edge
-  permitted ONLY while STARTED+unpaused. Dynamic window scale by remaining work. Off-task list
-  ≤12 rows + not-started red-outline at <24h. Single `task_window.rs` core module, zero UI logic.
-  Gentle "It's okay" copy on No.
-  - Progress (PLAN-step1.md phases): **P1 ✅** `task_window.rs` pure `display_list` (§6.8/§6.9), 59 core tests.
-    **P2 ✅ (2026-07-14)** data-model + additive migration: `tasks.estimate_minutes`/`logged_minutes`,
-    `task_tools`/`app_classes`/`app_usage` tables, `set_logged_minutes` (sole svc write), `task_tools()`/
-    `app_class()` readers, `PRAGMA user_version = 2`; svc persist tests green.
-    **P3 ✅ (2026-07-15)** STARTED sampling edge + lazy logged_minutes: `EdgeKind::Sample`; `Started` gains
-    `sample_at`/`off_task_since`; `arm_started` collapses the two runtime edges (check-in, sample) to their
-    earliest before the schedule merge, so the single-armed-timer invariant holds. Sampling is opt-in
-    (`[escalation] sample_secs = 0` default, `off_task_secs = 300`); a continuous off-task run ≥ threshold
-    raises the drift check-in, returning on-task resets it. svc: `sample_due` gate + `foreground_on_task`
-    (task_tools → productive_apps fallback; `ignore` kind, AW-down, and nothing-configured all read on-task)
-    + one-cadence `logged_minutes` accrual at the edge. 106 workspace tests green. Not committed.
-    **P4 ✅ (2026-07-15)** OFF-task check-in Yes/No + task list + Take-a-break + Pause (§6.5/§6.6):
-    `CheckInKind::{Periodic,OffTask}`; `Choosing`/`Paused`/`Break` states; `ShowTaskList`/`HideTaskList`;
-    `EdgeKind::{PauseExpiry,BreakExpiry}`; `Buttons` as core data; new svc `tasklist.rs` painting
-    `display_list` rows verbatim; tray Pause/Resume with `[escalation] break_secs`/`pause_secs`.
-    Pause is handled *before* the `!in_window` collapse and arms a bare expiry edge — that is what makes a
-    pause outlive its window and stay silent. 122 workspace tests green. Not committed.
+- [ ] **8 — Fix "Scan Gmail + Calendar" 403** | **Sonnet** | ~0.5–2h
+  Reported 2026-07-17: `messages.list ... status code 403` on the inbox scan. Likely a **stale OAuth scope** —
+  `gmail.readonly` was added last (step 10e, google/mod.rs SCOPES); a Google connection made before 10e holds
+  only calendar scopes, so the cached token can't call `users.messages.list` (403 insufficient permission).
+  Fix: (1) confirm `TokenCache.scope` (google/mod.rs) lacks `gmail.readonly`; (2) primary fix — **reconnect
+  Google** (`google_connect` re-consents with `prompt=consent`) and re-scan; (3) if still 403, verify the
+  **Gmail API is enabled** in the GCP project (console setting, not code). Add a UI hint: on a Gmail 403,
+  surface "Reconnect Google to grant mail access" instead of the raw error. Calendar half is unaffected.
 
-- [x] **2 — Drive P4's UI end-to-end once** | **Sonnet** | session 44 — ran, found 2 blocking bugs, NOT clean.
-  Method: `$env:LOCALAPPDATA` pointed at a scratch dir (never touched the real
-  `%LOCALAPPDATA%\nudge-bot\rules.toml`), scratch `rules.toml` with an always-live window and
-  `sample_secs=15`/`off_task_secs=20`/`break_secs=30`/`pause_secs=30`, one task seeded into
-  `sessions.db` directly (no `nudge-ctl` task-add verb exists — only rules/status/log). Built and ran
-  `nudge-svc.exe`/`nudge-ctl.exe` for real.
-  - **Confirmed working**: anchor strip renders (`BG_L0`, correct text, `WS_EX_TOPMOST`/`NOACTIVATE`
-    strip at the configured height/position). Button *hit-testing* works — a synthetic click at the
-    Start button's computed rect (`button_rect`) correctly drove `prompting → started`
-    (`nudge-ctl status`/`log` confirmed the edge).
-  - **BUG (blocking)**: the `[Start][Snooze][Skip]`/`[Yes][No][Break]` buttons never paint. Screenshot
-    at high zoom over the whole button-cluster rect (right 192px of the strip) shows flat background,
-    no button face/frame/label — `anchor_proc`'s `WM_PAINT` button-drawing loop
-    (`crates/nudge-svc/src/overlay.rs:339-345`) runs but produces no visible output, even though the
-    *geometry* (`button_rect`) is correct enough for hit-testing to work. Likely a GDI object/paint-order
-    bug (brush not selected into `hdc`? draw call ordering vs `EndPaint`?) — needs a focused repro, not
-    diagnosed further this session. A real user cannot see what to click; this alone blocks calling P4 done.
-  - **UNVERIFIED (not blocking, ran out of budget)**: off-task drift check-in never fired in ~7 min of a
-    Started task sitting on an off-task foreground app (`sample_secs=15`, `off_task_secs=20` — should
-    have fired within ~35s). No edge-log entry beyond `started`. Could be a real second bug in
-    `sample_due`/`EdgeTimer` (session 43 wrote both same-day, untested until now), or could be an
-    artifact of driving the click via synthetic `PostMessage` instead of a real OS click (message loop
-    may process input differently). Task list render, Yes/No, Take-a-break, and tray Pause/Resume were
-    **not exercised** — blocked on reaching the check-in first.
-  - **Next**: fix the button-paint bug first (small, isolated — `overlay.rs` paint path). Then re-run this
-    same scratch-config method and get an actual off-task check-in to fire (try a real mouse click instead
-    of `PostMessage`, or add an `eprintln!` at the `sample_due`/`arm_started` call sites to confirm the
-    timer is arming) before touching Tier B.
+- [ ] **6 — nudge-draft LLM title/time pass** | **Opus** | ~1d | **PARKED (2026-07-17)**
+  LLM pass to draft task titles/times from Gmail/GCal candidates. Needs the `nudge-draft` binary crate split
+  into lib+bin first. Parked by user: tasks are added manually / via spreadsheet, so the deterministic
+  connector heuristics (`connectors.rs`) are the shipped floor. Design notes for whoever revives it: HISTORY.md.
 
-- [x] **2b — Fix invisible prompt buttons + verify off-task check-in fires** | **Sonnet** | DONE session 46.
-  **Both items resolved — neither was a code bug.**
-  1. Button paint "bug" was a screenshot artifact: the strip is `WS_EX_LAYERED`, and BitBlt-based capture
-     (`Graphics.CopyFromScreen`, session 44's screenshots) omits layered windows unless `CAPTUREBLT` is set.
-     `PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT)` on the `NudgeAnchor` hwnd shows buttons render perfectly
-     (face + frame + labels, both `[Start][Snooze][Skip]` and `[Yes][No][Break]`). `overlay.rs` untouched.
-  2. Off-task check-in fires correctly. Session 44 never saw it for two stacked reasons, both environmental:
-     (a) the 30s `SetWaitableTimerEx` tolerable-delay makes each sample edge land up to `sample_secs+30s`
-     late (a 15s cadence really ticks ~45s) — patient waiting shows the timer is fine; and (b) with the
-     test's rules-window unlinked to any task, `window_task_id` is None and an empty `productive_apps`
-     means `foreground_on_task` reads on-task by design ("nothing configured → never nag"), so no drift
-     accrues. Adding `[classify] productive_apps` to the scratch config made the full path run.
-  Driven end-to-end live (session 46): prompting→Start→started, sample edges, off-task drift check-in
-  (`[Yes][No][Break]` strip), Yes→started, No→choosing + task list render ("What's actually due", red
-  outline <24h row, Take-a-break button), Take-a-break→break→expiry→started/resumed. All verified via
-  sessions.db edges + PrintWindow captures. 122 workspace tests green. **Tray Pause/Resume remains
-  unexercised** (needs a real tray-menu click; synthetic input can't reach it — fold into Tier B testing).
-  Method notes for future live-driving: `PrintWindow` + `PW_RENDERFULLCONTENT` for screenshots of the
-  layered strip (works even at the lock screen); `PostMessage(WM_LBUTTONDOWN)` drives buttons fine;
-  timer coalescing means allow +30s on every edge, or temporarily shrink the tolerance in
-  `timers.rs::arm_absolute` while testing.
-  UNSKIPPABLE before Tier B, found by Step 2 (session 44). Two items, do both in one pass since both
-  need the same scratch-config driving method already set up in Step 2's notes:
-  1. Button paint bug: `crates/nudge-svc/src/overlay.rs` `anchor_proc` `WM_PAINT` handler draws buttons
-     (`button_rect` + `FillRect`/`FrameRect`/`DrawTextW`, lines ~336-347) but nothing appears on screen,
-     even though the same rects hit-test correctly on click. Diagnose (GDI brush/object selection, draw
-     order, or a clipping rect issue) and fix.
-  2. Off-task check-in never observed firing (`sample_secs=15`/`off_task_secs=20` in test config, no
-     edge after 7 min of Started). Confirm whether `sample_due`/`arm_started`/`EdgeTimer` actually arms
-     and fires under a **real** mouse click (not `PostMessage`) — Step 2 used a synthetic click to work
-     around the paint bug, which may itself be the reason sampling never triggered.
-  Once both are clean, finish driving the rest of Step 2's checklist (task-list render, Yes/No, Take-a-
-  break, tray Pause/Resume) before starting Tier B.
-  - **Session 45 attempt — NOT resolved, re-pick this up next session.** Two background-agent delegation
-    attempts both failed: the agents got stuck in a confused loop each claiming the other was doing the
-    work, with zero real tool calls — do not delegate this step to a subagent again; drive it directly.
-    Doing it directly got as far as: workspace builds clean (`cargo build -p nudge-svc -p nudge-ctl`).
-    Scratch-config repro method reproduced from Step 2's notes and confirmed working: `$env:LOCALAPPDATA`
-    → a scratch temp dir, `rules.toml` with an always-live window + `sample_secs=15`/`off_task_secs=20`/
-    `break_secs=30`/`pause_secs=30`, one task seeded into the scratch `sessions.db` via Python's `sqlite3`
-    module (no `sqlite3` CLI installed in this env — use Python, and note `sqlite3.connect` needs a
-    Windows-style `C:/...` path, not the Git-Bash `/c/...` form, or it fails to open the file).
-    **New finding this session**: the default hotkey (`ctrl+alt+N`) collides with something already
-    registered on this machine and panics `nudge-svc` on launch (`RegisterHotKey ... already registered`)
-    — the scratch `rules.toml` must use a different combo (used `ctrl+alt+shift+Y` successfully). Worth
-    calling out in Step 2's/2b's method notes for whoever runs this next.
-    **Blocked**: could not get visual confirmation of the button-paint bug. `nudge-svc.exe` was running
-    live with the scratch config, but a `computer-use` `request_access` call for desktop screenshot access
-    was denied (`File Explorer` → `user_denied`), and `nudge-svc`'s window is a raw `WS_POPUP` tool window
-    with no taskbar identity anyway, so it's unclear the app-based permission model can even target it.
-    Static re-review of `overlay.rs`'s `WM_PAINT` handler (brush create/fill/frame/delete order, RECT
-    construction, tag packing/unpacking between paint and hit-test) found nothing conclusively wrong —
-    textbook GDI usage, consistent geometry between the two paths. **Live screen access is required to
-    make progress here**; static reading alone hasn' found the bug. Next session: either get computer-use
-    desktop access granted up front, or have the user manually run the scratch-config repro and describe/
-    screenshot what they see, before touching `overlay.rs` again.
-
-- [x] **3 — Tier B: ON-task check-in (§6.4) + tool classification screen + rich Tools selector (§6.2)** | **Opus** |
-  **Planning DONE session 47 → [PLAN-step3.md](PLAN-step3.md).** Decisions LOCKED (PLAN-step3 §1): (A)
-  since-last-checkin = accumulate sampled apps in svc scratch; on-task cadence is a floor, user-configurable
-  `[escalation] ontask_checkin_secs` (default 1800, set to seconds for testing); ordering optimises for
-  fastest functional state. Execute the five phases in PLAN-step3 §2, one per session:
-  - **P1 ✅ (2026-07-16, session 48)** core: `CheckInKind::OnTask` live, `Started.ontask_at` third runtime
-    edge in `arm_started`'s 3-way merge (floor semantics: on-task tick = silent re-arm), `ScheduleCtx.
-    {any_task_on_task,ontask_secs}`, `[escalation] ontask_checkin_secs` (default 1800 — ON for existing
-    configs, silent unless drifted). svc: `ontask_due` gate, `any_task_on_task()` union compare,
-    `seen_tools` accumulator (fills at probes, clears on check-in resolution — P2 consumes),
-    `Buttons::TaskList` rendered via Yes/No/Break stub (real picker = P2). 133 tests green. Not committed.
-  - **P2 ✅ (2026-07-16, session 49)** svc classification screen: `State::Classifying`,
-    `ShowClassify`/`HideClassify`, `Event::{PickTask,Classify,ClassifyDone}` + `ClassifyChoice`;
-    `classify.rs` overlay ([Tool][Not a tool][Ignore] per row, Done footer, auto-Done on last row);
-    OnTask picker = the task list (rows send `PickTask(task_id)`; §6.5 Choosing pick still resolves
-    like Start); OffTask Yes classifies only when tools accumulated + window has a task (else pre-P2
-    behaviour). Persistence via new svc writers `add_task_tool`/`set_app_class` at the main-loop seam.
-    143 tests green. Live drive deferred to P5. Not committed.
-  - **P3 ✅ (2026-07-16, session 50)** nudge-app: `ToolSelector.svelte` chip selector (usage-sorted,
-    favorites pinned, hidden toggle, manual add) in the Triggers form + Estimate field; Settings shell
-    with Tools tab (favorite/normal/hidden/not-tool, candidates, ignores view) + Style tab (band colors
-    → `meta.style_bands`); 10 new tauri commands; C.5 gap closed via new `aw_usage.rs` 90-day AW
-    aggregation behind `refresh_app_usage` (24h cap). 43 app tests + vite build green. Not committed.
-    Deferred: renderers don't read `style_bands` yet.
-  - **P4 ✅ (2026-07-16, session 51)** Tier-C switch + tray Pause submenu: `Started` gains `task_id`
-    (window-seeded; a list `PickTask` rebinds it and emits new `Effect::LaunchTools` — svc launches
-    `task_tools(kind='tool')` minus running exes via Toolhelp+ShellExecute); sample compare/accrual
-    follow the carried task. Tray Pause → duration submenu (20m–1.5h + rules default,
-    `TrayCmd::Pause(Option<i64>)`); paused-state tray icon (grey pause bars). Custom pause input
-    deferred. 145 workspace tests green. Not committed.
-  - **P5 ✅ (2026-07-16, session 52)** verify: 145 tests + svc/ctl/app builds green; live drive of
-    on-task check-in → task-list pick → classification → `task_tools`/`app_classes` persisted (both
-    synthetic and real-mouse). Review (low): 4 non-blocking findings logged in HISTORY session 52.
-  Deferred from Step 1 on purpose (PLAN §1): §6.4 overlaps §6.5's mechanics but needs the classification UI,
-  and building it before that UI exists means building it twice. `CheckInKind` gains its `OnTask` variant
-  here — that is the variant PLAN §2 named and P4 deliberately left out as dead code.
-  Also lands here: a row click switching the live window to the *picked* task (P4 resolves the check-in but
-  ignores the row's `task_id` — PLAN Tier C), and a tray Pause *submenu* of durations.
-
-- [x] **1 — Fix session-52 review findings (task carry + pause + accrual)** | **Sonnet** | DONE session 53.
-  (a) `State::CheckIn`/`Choosing`/`Paused` gained `task_id: Option<i64>`, threaded through resolution
-  arms and `quiet_tick`/`resume` (state.rs ~990-1097) so a Tier-C row-pick survives a check-in/pause
-  round-trip instead of resetting to `ctx.window_task_id`.
-  (b) Re-Pause while already `Paused` now preserves the existing `was_started`/`task_id` instead of
-  recomputing via `was_live()` (always false for `Paused`) — new `task_id_of()` helper, state.rs
-  ~1027-1037.
-  (c) `accrue_logged_minutes(&mut i64, i64) -> i64` extracted in main.rs; sub-minute sample cadences
-  now accrue a carried-seconds remainder instead of truncating to 0 minutes per tick.
-  148 workspace tests green (up from 145), builds clean. Not committed.
-
-- [x] **2 — Verify tray Pause submenu with a real tray click** | **Sonnet** | DONE session 54.
-  Reused the Step 2b scratch-config dir (`%TEMP%\claude\nudge-scratch\nudge-bot`, hotkey moved to
-  `ctrl+alt+shift+Y` to dodge the machine-wide collision noted in session 45). Launched
-  `nudge-svc.exe` via PowerShell with `$env:LOCALAPPDATA` pointed at the scratch dir (Bash's `cmd //c
-  start` failed with "Access is denied" — use PowerShell `Start-Process` for this on this machine).
-  User right-clicked the real tray icon → Pause → 20m: icon went grey (paused), Resume appeared.
-  `outcomes` table confirmed a single `paused` edge, then a single `resumed` edge after clicking
-  Resume — no stray/duplicate `PauseExpiry`. Tier B/C is now fully live-verified end-to-end.
-
-- [x] **3 — Renderers consume `meta.style_bands`** | **Sonnet** | DONE session 55.
-  `persist::Db` (nudge-svc) gained a `meta` table (byte-identical to the app's) + read-only `get_meta`.
-  `tasklist.rs`: `outline()` now takes a `bands: &[COLORREF]` palette (empty → falls back to the built-in
-  `OUTLINE_BANDS`); new `parse_bands`/`parse_hex_color` turn `#RRGGBB` strings into `COLORREF`s, dropping
-  unparseable entries rather than blanking the whole set. `TaskList::create` takes `bands` and threads it
-  through the paint-state mutex alongside rows/now. Read point: `main.rs`'s `Effect::ShowTaskList` arm
-  reads `meta.style_bands` fresh every time the list is shown (Style tab has no reload signal of its own,
-  so re-reading per-show is simpler than threading it through rules reload). `overlay.rs` (anchor strip)
-  never referenced band colors — only `tasklist.rs` needed this. 153 workspace tests green (up from 148),
-  svc + app builds clean. Not committed. Not live-driven (no visible band-color change to eyeball without
-  a live check-in list + a Style-tab edit in the same session — static verify only: unit tests cover
-  parse/fallback/clamp).
-
-- [x] **4 — Deadline-only tasks (no time-of-day) + undated-once suggestions** | **Sonnet** | DONE session 56.
-  `schedule::Win::from_task` (`crates/nudge-core/src/schedule.rs`) now falls back to a new
-  `DEFAULT_TASK_MINUTES` (09:00) whenever `t.minutes` is `None`, applied after the existing
-  `Once`-without-deadline `?` short-circuit — so a deadline-only Weekly task and a Once task whose
-  deadline is date-only both get a real window instead of silently never firing.
-  `accept_suggested_trigger` (nudge-app `db.rs`) needed no change: it already sets `minutes: None` for
-  an undated suggestion, and that now flows into the same fallback rather than dead-ending.
-  Deliberately scoped out (flagged, not guessed, per the escalate-if-contentious note): a `Recur::Once`
-  task with **no deadline** still produces no window — there's no calendar date to anchor a one-shot
-  firing to, and firing it every day would break "once" semantics. Stays a planner-only row.
-  3 schedule.rs tests updated/added (`undated_once_skipped`,
-  `deadline_only_weekly_task_uses_default_minutes`, `deadline_only_once_task_uses_default_minutes`).
-  153 workspace tests green. Not committed.
-
-- [x] **5 — Custom pause duration input** | **Sonnet** | DONE session 57.
-  No native text-entry control exists anywhere in nudge-svc (checked: no `EDIT` child window,
-  no `MessageBox`/`DialogBox` usage) and `overlay.rs`'s layered window is a display+click surface,
-  not an input one — building a real Win32 input dialog was out of scope for ~1h. Instead: new
-  `[escalation] custom_pause_secs` rules.toml field (default 3600s, validated alongside the other
-  durations in `rules::parse`); tray Pause submenu gained a "Custom (rules)" item (`tray.rs`) → new
-  `TrayCmd::PauseCustom` → `LoopSignal::PauseCustom` (`timers.rs`) → `Event::PauseFor(t,
-  rules.escalation.custom_pause_secs)` (`main.rs`), same stamping pattern as the existing
-  "Default (rules)" item. User sets the duration by editing rules.toml and clicking Tray > Reload
-  rules — no restart needed. 154 workspace tests green (up from 153; +1 `rules.rs` test for the
-  new field's default/override/negative-rejection). Not committed. Not live-driven (config +
-  submenu plumbing only, same risk class as the already-verified Default item).
-
-- [ ] **6 — nudge-draft LLM title/time pass** | **Opus** | ~1d | **FUTURE FEATURE — parked (session 58)**
-  Deferred from 10e: needs the binary crate split into lib+bin first, then an LLM pass that
-  drafts task titles/times from Gmail/GCal candidates. Architectural (crate split + API integration).
-  **Parked by user (2026-07-17): not wiring the connector-side LLM enrichment now — tasks are being
-  uploaded manually or via spreadsheet, so the deterministic connector heuristics (`connectors.rs`) are
-  the shipped floor and no auto-drafting is needed.** Design that was drafted then rolled back, for
-  whoever picks this up: split `nudge-draft` into `lib.rs` (`pub mod anthropic;` + a new `task` module)
-  and keep `main.rs` as the bin; the `task` module exposes `draft_task(api_key, model, &Candidate)
-  -> Result<TaskDraft>` where `TaskDraft { title, due_in_hours: Option<i64> }`, with a pure
-  `parse_task_draft` (strict-JSON reply `{"title", "due_in_hours"}`, clamp to a 2-week horizon) that's
-  unit-testable off a clock. `anthropic.rs` would need `ENDPOINT`/`API_VERSION`/`TIMEOUT`/a
-  `first_text_block` helper made `pub`. Then `nudge-app` adds `nudge-draft` as a path dep and calls the
-  pass best-effort inside `connectors::run_connectors`, gated on `ANTHROPIC_API_KEY`, falling back to the
-  heuristic title on any error. No code from this attempt is committed.
+## Done (one-line; detail in HISTORY.md)
+- [x] **10e** — Gmail/GCal connectors + `Recur::Once` date-anchored firing (session 41).
+- [x] **1** — UI addendum: task tools, check-in flow, dynamic deadline windows, style settings (session 43).
+- [x] **2 / 2b** — Drive P4 UI end-to-end; button-paint + off-task check-in confirmed non-bugs (sessions 44–46).
+- [x] **3** — Tier B: on-task check-in + tool classification screen + Tools selector; planned in [PLAN-step3.md](PLAN-step3.md) (sessions 47–52).
+- [x] **1** — Fix session-52 review findings: task carry + pause + accrual (session 53).
+- [x] **2** — Verify tray Pause submenu with a real tray click (session 54).
+- [x] **3** — Renderers consume `meta.style_bands` (session 55).
+- [x] **4** — Deadline-only tasks + undated-once suggestions (session 56).
+- [x] **5** — Custom pause duration via `[escalation] custom_pause_secs` (session 57).
 
 ## Session model: Sonnet (default) | Opus gate on planning/complex design | Haiku for trivial tasks
 - Read NEXTSTEPS.md at start. Scan for incomplete steps:
-  - **Priority 1**: Find an unskippable Sonnet step → proceed without prompting.
-  - **Priority 2**: If no unskippable Sonnet steps, find ANY Sonnet step → proceed without prompting.
-  - **Priority 3**: If no Sonnet steps remain, then apply Opus/Haiku gates.
-    - If marked Opus: state "Opus required for this step" and wait for user "Opus" response.
-    - If marked Haiku: state "Haiku sufficient for this step" and wait for user "Haiku" response.
-- Complete ONE step per session only. Update checkbox on done.
-- On completion, log the session to HISTORY.md (not this file) via the nextsteps-classifier skill.
-- If all done: end routine, confirm completion.
-- If NEXTSTEPS.md absent/empty: scan project for planned features, add next logical step to the list.
+  - **Priority 1**: unskippable Sonnet step → proceed without prompting.
+  - **Priority 2**: any Sonnet step → proceed without prompting.
+  - **Priority 3**: no Sonnet steps left → apply Opus/Haiku gates (state the gate, wait for the user's model reply).
+- Complete ONE step per session. Update the checkbox on done, log the session to HISTORY.md via the nextsteps-classifier skill.
+- If all done: confirm completion. If NEXTSTEPS.md absent/empty: scan for planned features, add the next logical step.
 
 ## GitHub Workflow
-- **Remote**: `https://github.com/harris11ax/nudge-bot-app.git`, `main` tracking `origin/main` (verified linked, session 39).
-- **Status quo (as of session 40)**: only one commit is actually pushed (`ade2023`, "Initial commit"). All
-  work since — sessions 2–40 per HISTORY.md — exists only in the local working tree/history, uncommitted.
-  Until the user asks to commit/push, treat NEXTSTEPS.md/HISTORY.md as still describing *uncommitted*
-  progress; don't claim something is "on GitHub" unless `git log`/`git status` confirms it.
-- **Branch strategy**: `main` is production-ready. Feature work goes on branches: `feature/description`,
-  `fix/description`. One NEXTSTEPS step per branch.
-- **Commit messages**: Clear, concise, reference the NEXTSTEPS step (e.g., "10c: Add primary calendar picker").
-- **PR workflow**: One step per PR, opened via `gh pr create` once `gh` is available/authenticated in this
-  environment (not currently — `gh` is absent from PATH here). Link the PR description to the relevant
-  NEXTSTEPS step. Request review before merge.
-- **Commits/pushes are still explicit-permission actions** (per this environment's safety rules) — write
-  them to disk and report readiness, but don't `git add`/`commit`/`push` without the user asking in the
-  same turn.
-- **Issues/Wiki migration**: HISTORY.md's per-session log is a candidate for GitHub Issues (one issue per
-  NEXTSTEPS step) or the repo Wiki once the user wants that split — not done yet; needs `gh` auth or a
-  manual pass, and is a deliberate ask, not an assumed default.
+- **Remote**: `https://github.com/harris11ax/nudge-bot-app.git`, `main` tracking `origin/main`.
+- **Uncommitted**: only `ade2023` ("Initial commit") is pushed; all work since (sessions 2–57) is local-only.
+  Don't claim anything is "on GitHub" unless `git log`/`git status` confirms it.
+- **Branches**: `main` is production-ready; feature work on `feature/…` / `fix/…`, one NEXTSTEPS step per branch/PR.
+- **Commit messages**: reference the NEXTSTEPS step (e.g. "7: CSV import parser").
+- **PRs**: via `gh pr create` once `gh` is authenticated here (not currently on PATH).
+- **Commits/pushes are explicit-permission actions** — write to disk and report readiness; don't `add`/`commit`/`push` unless the user asks in the same turn.
 
 ## Open Decisions
-- Max snoozes per prompt? (currently unlimited, each just logged.)
-- Check-in is global-only for now; per-window override (`[[nudge]].checkin_after_secs`) if wanted later.
-- UI: productive-app list global-only for P0, per-task later? Task-type taxonomy for checkbox filters — user to supply initial list.
+- Max snoozes per prompt? (currently unlimited, each logged.)
+- Check-in is global-only; per-window override (`[[nudge]].checkin_after_secs`) if wanted later.
+- Productive-app list global-only for now, per-task later? Task-type taxonomy for filters — user to supply initial list.

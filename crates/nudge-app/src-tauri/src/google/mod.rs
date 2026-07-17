@@ -29,7 +29,24 @@ fn client_config_path() -> PathBuf {
 
 pub fn load_client_config() -> Option<ClientConfig> {
     let bytes = std::fs::read(client_config_path()).ok()?;
-    serde_json::from_slice(&bytes).ok()
+    parse_client_config(&bytes)
+}
+
+/// Accept both the flat `{"client_id","client_secret"}` form and Google Cloud
+/// Console's downloaded Desktop-client wrapper `{"installed":{...}}` (or the
+/// `{"web":{...}}` variant), so a user can drop the file verbatim without
+/// hand-reformatting it. Extra keys (auth_uri, token_uri, …) are ignored.
+fn parse_client_config(bytes: &[u8]) -> Option<ClientConfig> {
+    #[derive(Deserialize)]
+    struct Wrapper {
+        installed: Option<ClientConfig>,
+        web: Option<ClientConfig>,
+    }
+    if let Ok(flat) = serde_json::from_slice::<ClientConfig>(bytes) {
+        return Some(flat);
+    }
+    let w: Wrapper = serde_json::from_slice(bytes).ok()?;
+    w.installed.or(w.web)
 }
 
 /// Cached tokens, DPAPI-sealed on disk — `refresh_token` is long-lived and
@@ -192,5 +209,41 @@ mod dpapi {
     }
     pub fn unprotect(_sealed: &[u8]) -> Result<Vec<u8>, String> {
         Err("google token cache requires Windows (DPAPI)".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_client_config;
+
+    #[test]
+    fn flat_form() {
+        let c = parse_client_config(br#"{"client_id":"cid","client_secret":"sec"}"#).unwrap();
+        assert_eq!(c.client_id, "cid");
+        assert_eq!(c.client_secret.as_deref(), Some("sec"));
+    }
+
+    #[test]
+    fn google_installed_wrapper_with_extra_keys() {
+        let raw = br#"{"installed":{"client_id":"cid","project_id":"p",
+            "auth_uri":"https://accounts.google.com/o/oauth2/auth",
+            "token_uri":"https://oauth2.googleapis.com/token",
+            "client_secret":"sec","redirect_uris":["http://localhost"]}}"#;
+        let c = parse_client_config(raw).unwrap();
+        assert_eq!(c.client_id, "cid");
+        assert_eq!(c.client_secret.as_deref(), Some("sec"));
+    }
+
+    #[test]
+    fn web_wrapper() {
+        let c = parse_client_config(br#"{"web":{"client_id":"cid"}}"#).unwrap();
+        assert_eq!(c.client_id, "cid");
+        assert!(c.client_secret.is_none());
+    }
+
+    #[test]
+    fn garbage_is_none() {
+        assert!(parse_client_config(b"not json").is_none());
+        assert!(parse_client_config(br#"{"nope":1}"#).is_none());
     }
 }
