@@ -53,6 +53,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 button.ghost { border: none; background: none; color: var(--fg-muted); }
 button.danger { background: var(--danger); color: #fff; border-color: transparent; }
 button.block { width: 100%; margin-top: 8px; }
+.btn-row { display: flex; gap: 8px; align-items: center; }
 
 input, select, textarea {
   font: inherit;

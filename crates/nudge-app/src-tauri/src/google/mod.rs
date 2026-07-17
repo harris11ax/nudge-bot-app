@@ -143,6 +143,20 @@ pub fn google_connect() -> Result<(), String> {
     tokens.save()
 }
 
+/// Drop the cached tokens so the next `google_connect` runs full consent from
+/// scratch — the fix when a stale token holds narrower scopes than `SCOPES`
+/// (e.g. a pre-10e token lacking `gmail.readonly`, which surfaces as a 403 on
+/// the first Gmail call). Removing the file is idempotent: an already-absent
+/// cache is success, not an error.
+#[tauri::command]
+pub fn google_disconnect() -> Result<(), String> {
+    match std::fs::remove_file(token_cache_path()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// A valid access token, refreshing via the cached `refresh_token` if needed.
 /// `calendar.rs`/`gmail.rs` (10b+) call this before each API request.
 pub fn access_token() -> Result<String, String> {

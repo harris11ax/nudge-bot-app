@@ -3,6 +3,7 @@
   import {
     googleStatus,
     googleConnect,
+    googleDisconnect,
     listCalendars,
     setCalendarSelected,
     primaryCalendar,
@@ -64,6 +65,18 @@
     }
   }
 
+  async function disconnect() {
+    error = "";
+    try {
+      await googleDisconnect();
+      calendars = [];
+      primary = null;
+      await load();
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
   async function toggle(c) {
     const next = !c.selected;
     try {
@@ -89,9 +102,20 @@
     <p class={status === "connected" ? "ok" : "hint"}>
       {status === "connected" ? "Connected" : "Not connected"}
     </p>
-    <button class="primary" onclick={connect} disabled={connecting}>
-      {connecting ? "Waiting for sign-in…" : status === "connected" ? "Reconnect" : "Connect Google"}
-    </button>
+    <div class="btn-row">
+      <button class="primary" onclick={connect} disabled={connecting}>
+        {connecting ? "Waiting for sign-in…" : status === "connected" ? "Reconnect" : "Connect Google"}
+      </button>
+      {#if status === "connected"}
+        <button class="ghost" onclick={disconnect} disabled={connecting}>Reset connection</button>
+      {/if}
+    </div>
+    {#if status === "connected"}
+      <p class="hint">
+        Gmail scan returning 403? Click <strong>Reset connection</strong>, then
+        <strong>Reconnect</strong> and approve the Gmail permission to refresh the granted scopes.
+      </p>
+    {/if}
     {#if status === "connected" && calendars.length > 0}
       <h3 class="cal-settings-h">Overlay on Calendar tab</h3>
       <ul class="cal-checklist">

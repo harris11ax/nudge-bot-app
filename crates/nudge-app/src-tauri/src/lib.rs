@@ -764,6 +764,7 @@ pub fn run() {
             get_pending_task,
             google::google_status,
             google::google_connect,
+            google::google_disconnect,
             list_calendars,
             set_calendar_selected,
             refresh_calendars,

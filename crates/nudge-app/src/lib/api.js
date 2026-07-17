@@ -24,6 +24,8 @@ export const googleStatus = () => invoke("google_status");
 /** Run the PKCE consent flow (opens the system browser); rejects on cancel/timeout. */
 export const googleConnect = () => invoke("google_connect");
 
+export const googleDisconnect = () => invoke("google_disconnect");
+
 /** @returns {Promise<Array>} calendars known locally (cached selection/primary state, works offline). */
 export const listCalendars = () => invoke("list_calendars");
 
