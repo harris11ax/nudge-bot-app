@@ -7,7 +7,8 @@ Last completed: session 57 — Step 5 **DONE** (tray Pause submenu gains a "Cust
 by a new `[escalation] custom_pause_secs` rules.toml field, default 3600s; no free-text input surface
 exists in this Win32 app, so the duration is edited in rules.toml and picked up live via the existing
 Tray > Reload rules path — 154 tests green). Next: step 6 (Opus — nudge-draft LLM title/time pass) is
-the only step left; all Sonnet steps done. Full history: [HISTORY.md](HISTORY.md).
+the only step left; PARKED by user as a future feature (2026-07-17) — tasks uploaded manually / via
+spreadsheet, so connector auto-drafting isn't needed. Full history: [HISTORY.md](HISTORY.md).
 
 ## Next steps
 - [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
@@ -231,9 +232,20 @@ the only step left; all Sonnet steps done. Full history: [HISTORY.md](HISTORY.md
   new field's default/override/negative-rejection). Not committed. Not live-driven (config +
   submenu plumbing only, same risk class as the already-verified Default item).
 
-- [ ] **6 — nudge-draft LLM title/time pass** | **Opus** | ~1d
+- [ ] **6 — nudge-draft LLM title/time pass** | **Opus** | ~1d | **FUTURE FEATURE — parked (session 58)**
   Deferred from 10e: needs the binary crate split into lib+bin first, then an LLM pass that
   drafts task titles/times from Gmail/GCal candidates. Architectural (crate split + API integration).
+  **Parked by user (2026-07-17): not wiring the connector-side LLM enrichment now — tasks are being
+  uploaded manually or via spreadsheet, so the deterministic connector heuristics (`connectors.rs`) are
+  the shipped floor and no auto-drafting is needed.** Design that was drafted then rolled back, for
+  whoever picks this up: split `nudge-draft` into `lib.rs` (`pub mod anthropic;` + a new `task` module)
+  and keep `main.rs` as the bin; the `task` module exposes `draft_task(api_key, model, &Candidate)
+  -> Result<TaskDraft>` where `TaskDraft { title, due_in_hours: Option<i64> }`, with a pure
+  `parse_task_draft` (strict-JSON reply `{"title", "due_in_hours"}`, clamp to a 2-week horizon) that's
+  unit-testable off a clock. `anthropic.rs` would need `ENDPOINT`/`API_VERSION`/`TIMEOUT`/a
+  `first_text_block` helper made `pub`. Then `nudge-app` adds `nudge-draft` as a path dep and calls the
+  pass best-effort inside `connectors::run_connectors`, gated on `ANTHROPIC_API_KEY`, falling back to the
+  heuristic title on any error. No code from this attempt is committed.
 
 ## Session model: Sonnet (default) | Opus gate on planning/complex design | Haiku for trivial tasks
 - Read NEXTSTEPS.md at start. Scan for incomplete steps:
