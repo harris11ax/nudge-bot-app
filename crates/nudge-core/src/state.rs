@@ -87,17 +87,26 @@ pub enum State {
         task_id: Option<i64>,
     },
     /// A post-start check-in prompt is showing, awaiting the user's answer.
-    CheckIn { shown_at: UnixTime, kind: CheckInKind },
+    /// `task_id` carries the `Started.task_id` that was live when the check-in
+    /// was raised (a Tier-C row-pick switch survives here) so resolving back to
+    /// `Started` rebinds to the task the user was actually on, not
+    /// `ctx.window_task_id` (session-52 review finding a).
+    CheckIn { shown_at: UnixTime, kind: CheckInKind, task_id: Option<i64> },
     /// The user answered No to a drift check-in and the §6.5 task list is on
     /// screen. Modelled as part of the check-in family: an ignored list dismisses
     /// itself at the next schedule edge, exactly as an ignored check-in does.
-    Choosing { shown_at: UnixTime },
+    /// `task_id` carries the live task the same way [`State::CheckIn`] does.
+    Choosing { shown_at: UnixTime, task_id: Option<i64> },
     /// Tray Pause (§6.6). Reachable from any state; everything is off screen and
     /// exactly one `PauseExpiry` edge is armed — no schedule edge is merged, so
     /// nothing fires until `resume_at`. `was_started` remembers whether a task was
     /// live, so resuming lands back in `Started` instead of re-nagging the user to
-    /// start what they were already doing.
-    Paused { resume_at: UnixTime, was_started: bool },
+    /// start what they were already doing. `task_id` carries the live task the
+    /// same way [`State::CheckIn`] does, so a Tier-C row-pick switch survives a
+    /// pause/resume cycle too. Re-pausing while already `Paused` preserves both
+    /// fields verbatim rather than recomputing them (session-52 finding b) —
+    /// see [`enter_quiet`].
+    Paused { resume_at: UnixTime, was_started: bool, task_id: Option<i64> },
     /// Take-a-break from the §6.5 No path. Identical single-edge silencing to
     /// [`State::Paused`]; distinct only so the outcomes log can tell a break the
     /// user chose from a pause they reached for.
@@ -384,11 +393,11 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
         return enter_quiet(state, now, now + secs, Quiet::Pause);
     }
     match state {
-        State::Paused { resume_at, was_started } => {
-            return quiet_tick(state, resume_at, was_started, Quiet::Pause, event, now, ctx)
+        State::Paused { resume_at, was_started, task_id } => {
+            return quiet_tick(state, resume_at, was_started, task_id, Quiet::Pause, event, now, ctx)
         }
         State::Break { resume_at } => {
-            return quiet_tick(state, resume_at, true, Quiet::Break, event, now, ctx)
+            return quiet_tick(state, resume_at, true, None, Quiet::Break, event, now, ctx)
         }
         _ => {}
     }
@@ -552,7 +561,7 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
                     show_checkin(CheckInKind::Periodic, ctx, &mut fx);
                     fx.push(Effect::LogEdge { entered: "checkin", at: now, mode: Some(Mode::OffTask) });
                     arm_schedule(ctx, &mut fx);
-                    return (State::CheckIn { shown_at: now, kind: CheckInKind::Periodic }, fx);
+                    return (State::CheckIn { shown_at: now, kind: CheckInKind::Periodic, task_id }, fx);
                 }
             }
 
@@ -563,7 +572,7 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
                         show_checkin(CheckInKind::OnTask, ctx, &mut fx);
                         fx.push(Effect::LogEdge { entered: "checkin", at: now, mode: Some(Mode::OffTask) });
                         arm_schedule(ctx, &mut fx);
-                        return (State::CheckIn { shown_at: now, kind: CheckInKind::OnTask }, fx);
+                        return (State::CheckIn { shown_at: now, kind: CheckInKind::OnTask, task_id }, fx);
                     }
                     // On some task's tools at the tick → the floor says stay
                     // quiet; re-arm the next tick, bumping a co-due sample edge.
@@ -611,7 +620,7 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
                         show_checkin(CheckInKind::OffTask, ctx, &mut fx);
                         fx.push(Effect::LogEdge { entered: "checkin", at: now, mode: Some(Mode::OffTask) });
                         arm_schedule(ctx, &mut fx);
-                        return (State::CheckIn { shown_at: now, kind: CheckInKind::OffTask }, fx);
+                        return (State::CheckIn { shown_at: now, kind: CheckInKind::OffTask, task_id }, fx);
                     }
                     arm_started(checkin_at, next_sample, ontask_at, ctx, &mut fx);
                     return (
@@ -647,10 +656,10 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
         // picker against the picked row's. With nothing accumulated (or no task
         // to route to) the guard fails and the plain resolution below applies,
         // exactly as pre-P2. Periodic's Ack never lands here — no tool set.
-        (State::CheckIn { kind: CheckInKind::OffTask, .. }, Event::CheckInYes(_))
-            if !ctx.classify_tools.is_empty() && ctx.window_task_id.is_some() =>
+        (State::CheckIn { kind: CheckInKind::OffTask, task_id, .. }, Event::CheckInYes(_))
+            if !ctx.classify_tools.is_empty() && task_id.is_some() =>
         {
-            let task_id = ctx.window_task_id.expect("guarded");
+            let task_id = task_id.expect("guarded");
             enter_classifying(state, task_id, now, ctx, fx)
         }
         (State::CheckIn { kind: CheckInKind::OnTask, .. }, Event::PickTask(_, id))
@@ -693,13 +702,13 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
         // Skip's dismiss-for-good meaning at the prompt. Ack is Yes under the
         // periodic check-in's Start/Skip button set. (A row pick is no longer
         // here — it switches tasks in the Tier-C arm above.)
-        (State::CheckIn { .. }, Event::Ack(_))
-        | (State::CheckIn { .. }, Event::CheckInYes(_))
-        | (State::CheckIn { .. }, Event::Skip(_))
+        (State::CheckIn { task_id, .. }, Event::Ack(_))
+        | (State::CheckIn { task_id, .. }, Event::CheckInYes(_))
+        | (State::CheckIn { task_id, .. }, Event::Skip(_))
         // Dismissing the §6.5 list resolves the same way: the list is how we
         // asked "so what *are* you doing?", and either answer ends the question.
-        | (State::Choosing { .. }, Event::Ack(_))
-        | (State::Choosing { .. }, Event::Skip(_)) => {
+        | (State::Choosing { task_id, .. }, Event::Ack(_))
+        | (State::Choosing { task_id, .. }, Event::Skip(_)) => {
             let yes = matches!(event, Event::Ack(_) | Event::CheckInYes(_));
             let outcome = if yes { Outcome::CheckedIn } else { Outcome::Skipped };
             let sample_at = if yes { ctx.sample_secs.map(|s| now + s) } else { None };
@@ -714,7 +723,11 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
                     sample_at,
                     off_task_since: None,
                     ontask_at,
-                    task_id: ctx.window_task_id,
+                    // Carry the task_id the check-in/list was raised about
+                    // (session-52 finding a) rather than resetting to
+                    // ctx.window_task_id, which would silently drop a Tier-C
+                    // row-pick switch.
+                    task_id,
                 },
                 fx,
             )
@@ -724,13 +737,13 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
         // rows arrive precomputed in `ctx` — core picks nothing. Still a
         // check-in-family state, so an ignored list dies at the next schedule edge
         // rather than sitting on screen forever.
-        (State::CheckIn { .. }, Event::CheckInNo(_)) => {
+        (State::CheckIn { task_id, .. }, Event::CheckInNo(_)) => {
             fx.push(Effect::HidePrompt);
             fx.push(Effect::ShowTaskList { rows: ctx.task_rows.clone() });
             fx.push(Effect::LogEdge { entered: "choosing", at: now, mode: None });
             fx.push(Effect::LogOutcome { outcome: Outcome::CheckedInNo, at: now });
             arm_schedule(ctx, &mut fx);
-            (State::Choosing { shown_at: now }, fx)
+            (State::Choosing { shown_at: now, task_id }, fx)
         }
 
         // Take-a-break, from the check-in box, the list it opened, or the
@@ -784,15 +797,15 @@ pub fn next(state: State, event: &Event, ctx: &ScheduleCtx) -> (State, Vec<Effec
 
         // Reload while a check-in or its list is showing: re-emit so a restart
         // keeps it on screen.
-        (State::CheckIn { shown_at, kind }, Event::RulesReloaded(_)) => {
+        (State::CheckIn { shown_at, kind, task_id }, Event::RulesReloaded(_)) => {
             show_checkin(kind, ctx, &mut fx);
             arm_schedule(ctx, &mut fx);
-            (State::CheckIn { shown_at, kind }, fx)
+            (State::CheckIn { shown_at, kind, task_id }, fx)
         }
-        (State::Choosing { shown_at }, Event::RulesReloaded(_)) => {
+        (State::Choosing { shown_at, task_id }, Event::RulesReloaded(_)) => {
             fx.push(Effect::ShowTaskList { rows: ctx.task_rows.clone() });
             arm_schedule(ctx, &mut fx);
-            (State::Choosing { shown_at }, fx)
+            (State::Choosing { shown_at, task_id }, fx)
         }
 
         // Everything else in-window (e.g. stray user events with no live prompt,

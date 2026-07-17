@@ -287,6 +287,14 @@ fn main() {
     // classification screen is the consumer; P1 only fills it.
     let mut seen_tools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
+    // Sub-minute sample-cadence accrual remainder (session-52 finding c):
+    // `logged_minutes` is stored in whole minutes, but `sample_secs` can be
+    // shorter than 60s (e.g. fast test configs), so `secs / 60` truncates to 0
+    // and testing configs never accrue anything. Accrue in seconds here per
+    // task and only flush a whole minute into the persisted column when one
+    // has actually accumulated, carrying any leftover seconds forward.
+    let mut logged_secs_remainder: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+
     // Message loop: wakes only on edge timer, quit event, hotkey, or tray
     // messages.
     let timer_handle = res.edge_timer.raw();
@@ -381,8 +389,14 @@ fn main() {
                 foreground_on_task(&res.db, &rules, live_task, app.as_deref());
             if ctx.foreground_on_task {
                 if let (Some(id), Some(secs)) = (live_task, ctx.sample_secs) {
-                    let logged = tasks.iter().find(|t| t.id == Some(id)).map_or(0, |t| t.logged_minutes);
-                    res.db.set_logged_minutes(id, logged + (secs / 60) as u32);
+                    let remainder = logged_secs_remainder.entry(id).or_insert(0);
+                    *remainder += secs;
+                    let whole_minutes = *remainder / 60;
+                    *remainder %= 60;
+                    if whole_minutes > 0 {
+                        let logged = tasks.iter().find(|t| t.id == Some(id)).map_or(0, |t| t.logged_minutes);
+                        res.db.set_logged_minutes(id, logged + whole_minutes as u32);
+                    }
                 }
             }
         }
