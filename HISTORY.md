@@ -369,3 +369,23 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
   resolution/classification rebinds to `window_task_id`, dropping a Tier-C pick; (4) `logged_minutes`
   accrual truncates `sample_secs/60` → 0 for sub-minute cadences. Candidates for a follow-up step.
 - Step 3 ticked in NEXTSTEPS. Not committed.
+
+## Session 55 (2026-07-17) — Step 3: renderers consume `meta.style_bands`
+- `persist::Db` (nudge-svc) gained a `meta` table (byte-identical to nudge-app's `db.rs` one — both
+  crates open the same `sessions.db`) + read-only `get_meta(key)`.
+- `tasklist.rs`: `outline(style, bands)` takes the §6.9 palette as a parameter instead of always reading
+  the built-in `OUTLINE_BANDS` const — empty `bands` (unset setting) falls back to it. New
+  `parse_bands`/`parse_hex_color` turn `#RRGGBB` strings (the format `set_style_bands` writes) into
+  `COLORREF`s, dropping any entry that fails to parse rather than discarding the whole palette. The
+  paint-state static (`ROWS`) widened to carry `Vec<COLORREF>` alongside rows/now so `WM_PAINT` can read
+  it; `TaskList::create` takes `bands: &[COLORREF]`.
+- `main.rs`: `Effect::ShowTaskList` reads `meta.style_bands` fresh every time the list is about to show,
+  parses it, and passes the result to `TaskList::create`. Chose "read at show time" over threading it
+  through rules reload because the Style tab has no reload-signal of its own (unlike rules.toml edits) —
+  re-reading per-show is one query and stays correct without adding a new signal path.
+  `overlay.rs` (the anchor strip) never referenced band colors, so it needed no change.
+- 153 workspace tests green (up from 148: +5 tasklist — empty/custom/clamp outline cases,
+  `parse_bands` good/bad-entry handling). `cargo build -p nudge-svc` and nudge-app `cargo build` both
+  clean (only pre-existing warnings). Not live-driven: verifying a visible band-color change needs a
+  live check-in list up at the same time as a Style-tab edit in the running app, which wasn't set up
+  this session — static/unit coverage only. Not committed.

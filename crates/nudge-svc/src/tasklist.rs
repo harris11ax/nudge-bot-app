@@ -61,13 +61,34 @@ const BREAK_LABEL: &str = "Take a break";
 
 static REGISTER: Once = Once::new();
 
-/// The rows currently on screen, plus the instant they were computed for (so
-/// "due in" reads relative to the list, not to whenever a repaint happens). One
+/// The rows currently on screen, the instant they were computed for (so
+/// "due in" reads relative to the list, not to whenever a repaint happens), and
+/// the §6.9 band outline colours in effect (empty = use [`OUTLINE_BANDS`]). One
 /// list exists at a time — the WndProc is stateless and reads from here.
-static ROWS: OnceLock<Mutex<(Vec<Row>, UnixTime)>> = OnceLock::new();
+static ROWS: OnceLock<Mutex<(Vec<Row>, UnixTime, Vec<COLORREF>)>> = OnceLock::new();
 
-fn rows() -> &'static Mutex<(Vec<Row>, UnixTime)> {
-    ROWS.get_or_init(|| Mutex::new((Vec::new(), 0)))
+fn rows() -> &'static Mutex<(Vec<Row>, UnixTime, Vec<COLORREF>)> {
+    ROWS.get_or_init(|| Mutex::new((Vec::new(), 0, Vec::new())))
+}
+
+/// Parse §6.9 Style-tab band colours (`#RRGGBB` strings, as written by
+/// `set_style_bands`) into paint-ready [`COLORREF`]s. Any entry that fails to
+/// parse is dropped rather than aborting the whole set — a single bad row in
+/// the settings store shouldn't blank every band back to defaults.
+pub fn parse_bands(raw: &[String]) -> Vec<COLORREF> {
+    raw.iter().filter_map(|s| parse_hex_color(s)).collect()
+}
+
+fn parse_hex_color(s: &str) -> Option<COLORREF> {
+    let hex = s.strip_prefix('#').unwrap_or(s);
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    // COLORREF packs 0x00BBGGRR.
+    Some(COLORREF(((b as u32) << 16) | ((g as u32) << 8) | r as u32))
 }
 
 pub struct TaskList {
@@ -77,10 +98,11 @@ pub struct TaskList {
 impl TaskList {
     /// Put `rows` on screen, centred. Height follows the row count — the list is
     /// already capped at `WindowCfg::max_rows` (12) by `display_list`, so this
-    /// cannot grow without bound.
-    pub fn create(new_rows: &[Row], now: UnixTime) -> Self {
+    /// cannot grow without bound. `bands` are the §6.9 Style-tab outline colours
+    /// (empty = built-in defaults).
+    pub fn create(new_rows: &[Row], now: UnixTime, bands: &[COLORREF]) -> Self {
         if let Ok(mut g) = rows().lock() {
-            *g = (new_rows.to_vec(), now);
+            *g = (new_rows.to_vec(), now, bands.to_vec());
         }
         unsafe {
             let hinst = GetModuleHandleW(None).expect("GetModuleHandleW");
@@ -126,6 +148,7 @@ impl Drop for TaskList {
         }
         if let Ok(mut g) = rows().lock() {
             g.0.clear();
+            g.2.clear();
         }
     }
 }
@@ -150,14 +173,17 @@ fn break_rect(client_height: i32) -> RECT {
     }
 }
 
-/// The outline a row's [`StyleClass`] calls for. Bands beyond the palette clamp
-/// to its last colour rather than panicking — core owns how many bands exist and
-/// the user can add more from the Style settings.
-fn outline(style: &StyleClass) -> COLORREF {
+/// The outline a row's [`StyleClass`] calls for. `bands` is the §6.9 Style-tab
+/// palette in effect (empty = fall back to the built-in [`OUTLINE_BANDS`]).
+/// Bands beyond the palette clamp to its last colour rather than panicking —
+/// core owns how many bands exist and the user can add more from the Style
+/// settings.
+fn outline(style: &StyleClass, bands: &[COLORREF]) -> COLORREF {
+    let palette = if bands.is_empty() { &OUTLINE_BANDS[..] } else { bands };
     match style {
         StyleClass::NotStarted => OUTLINE_NOT_STARTED,
         StyleClass::NotStartedUrgent => OUTLINE_URGENT,
-        StyleClass::Band(n) => OUTLINE_BANDS[(*n as usize).min(OUTLINE_BANDS.len() - 1)],
+        StyleClass::Band(n) => palette[(*n as usize).min(palette.len() - 1)],
     }
 }
 
@@ -214,7 +240,7 @@ extern "system" fn list_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                 let _ = EndPaint(hwnd, &ps);
                 return LRESULT(0);
             };
-            let (list, now) = &*guard;
+            let (list, now, bands) = &*guard;
 
             SetTextColor(hdc, FG_DIM);
             let mut hrc = RECT { left: PAD, top: 0, right: WIDTH - PAD, bottom: HEADER_H };
@@ -224,7 +250,7 @@ extern "system" fn list_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
             for (i, r) in list.iter().enumerate() {
                 let rr = row_rect(i as i32);
                 FillRect(hdc, &rr, face);
-                let frame = CreateSolidBrush(outline(&r.style));
+                let frame = CreateSolidBrush(outline(&r.style, bands));
                 FrameRect(hdc, &rr, frame);
                 let _ = DeleteObject(frame);
 
@@ -323,9 +349,35 @@ mod tests {
     // band count is the user's to set from the Style settings, not ours.
     #[test]
     fn outline_clamps_unknown_bands() {
-        assert_eq!(outline(&StyleClass::NotStartedUrgent).0, OUTLINE_URGENT.0);
-        assert_eq!(outline(&StyleClass::Band(0)).0, OUTLINE_BANDS[0].0);
-        assert_eq!(outline(&StyleClass::Band(99)).0, OUTLINE_BANDS[2].0);
+        assert_eq!(outline(&StyleClass::NotStartedUrgent, &[]).0, OUTLINE_URGENT.0);
+        assert_eq!(outline(&StyleClass::Band(0), &[]).0, OUTLINE_BANDS[0].0);
+        assert_eq!(outline(&StyleClass::Band(99), &[]).0, OUTLINE_BANDS[2].0);
+    }
+
+    // An empty Style-tab setting (nothing saved yet) falls back to the built-in
+    // palette rather than painting a blank/black outline.
+    #[test]
+    fn outline_empty_bands_falls_back_to_defaults() {
+        assert_eq!(outline(&StyleClass::Band(1), &[]).0, OUTLINE_BANDS[1].0);
+    }
+
+    // A non-empty §6.9 palette overrides the built-in colours, still clamping
+    // beyond its own length.
+    #[test]
+    fn outline_uses_custom_bands_when_set() {
+        let custom = vec![COLORREF(0x0000_0001), COLORREF(0x0000_0002)];
+        assert_eq!(outline(&StyleClass::Band(0), &custom).0, custom[0].0);
+        assert_eq!(outline(&StyleClass::Band(1), &custom).0, custom[1].0);
+        assert_eq!(outline(&StyleClass::Band(9), &custom).0, custom[1].0);
+    }
+
+    #[test]
+    fn parse_bands_drops_bad_entries_and_keeps_good_ones() {
+        let raw = vec!["#112233".to_string(), "not-a-color".to_string(), "445566".to_string()];
+        let parsed = parse_bands(&raw);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, 0x0033_2211);
+        assert_eq!(parsed[1].0, 0x0066_5544);
     }
 
     // Paint and hit-test share `row_rect`, so rows never overlap and the click

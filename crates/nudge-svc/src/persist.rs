@@ -61,6 +61,13 @@ impl Db {
                  app_name     TEXT PRIMARY KEY,
                  minutes_90d  INTEGER NOT NULL DEFAULT 0,
                  refreshed_at INTEGER
+             );
+             -- App-owned key/value settings (§6.9 style bands, etc). Byte-
+             -- identical to nudge-app's `meta` table; the svc is a read-only
+             -- consumer here.
+             CREATE TABLE IF NOT EXISTS meta (
+                 key   TEXT PRIMARY KEY,
+                 value TEXT NOT NULL
              );",
         )
         .expect("schema");
@@ -248,6 +255,14 @@ impl Db {
                 rusqlite::params![task_id, minutes as i64],
             )
             .expect("set logged_minutes")
+    }
+
+    /// Read an app-owned `meta` value (§6.9 style bands, etc). `None` if the key
+    /// is unset — the svc never writes this table, only reads what the app left.
+    pub fn get_meta(&self, key: &str) -> Option<String> {
+        self.conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .ok()
     }
 }
 

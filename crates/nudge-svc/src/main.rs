@@ -186,7 +186,15 @@ fn run_effects(effects: Vec<Effect>, now: i64, res: &mut Resources) {
             // Rows arrive fully selected/sorted/styled from `task_window`; the
             // window below only paints them.
             Effect::ShowTaskList { rows } => {
-                res.tasklist = Some(tasklist::TaskList::create(&rows, now))
+                // Read fresh each time the list is shown (§6.9): the Style tab
+                // has no reload signal of its own, so this is the read point.
+                let bands = res
+                    .db
+                    .get_meta("style_bands")
+                    .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+                    .map(|raw| tasklist::parse_bands(&raw))
+                    .unwrap_or_default();
+                res.tasklist = Some(tasklist::TaskList::create(&rows, now, &bands))
             }
             Effect::HideTaskList => drop(res.tasklist.take()),
             // Tools arrive snapshotted from the svc's own accumulator; task_id

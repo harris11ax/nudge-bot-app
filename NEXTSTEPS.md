@@ -3,9 +3,9 @@
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below
      for branch/commit/PR conventions now that this is a real remote, not just a local tree. -->
 
-Last completed: session 54 — Step 2 **DONE** (verified tray Pause submenu with a real tray click:
-paused/resumed edges confirmed clean in scratch sessions.db, no stray PauseExpiry). Next: step 3
-(Sonnet — renderers consume meta.style_bands). Full history: [HISTORY.md](HISTORY.md).
+Last completed: session 55 — Step 3 **DONE** (svc tasklist renderer now reads `meta.style_bands`,
+falls back to built-in colors when unset; 153 tests green, not live-driven). Next: step 4 (Sonnet —
+deadline-only tasks + undated-once suggestions). Full history: [HISTORY.md](HISTORY.md).
 
 ## Next steps
 - [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
@@ -189,9 +189,18 @@ paused/resumed edges confirmed clean in scratch sessions.db, no stray PauseExpir
   `outcomes` table confirmed a single `paused` edge, then a single `resumed` edge after clicking
   Resume — no stray/duplicate `PauseExpiry`. Tier B/C is now fully live-verified end-to-end.
 
-- [ ] **3 — Renderers consume `meta.style_bands`** | **Sonnet** | ~1h
-  Deferred from P3: StyleTab writes band colors to `meta.style_bands` but svc tasklist/overlay renderers
-  still use hardcoded band colors. Read the setting at rules/task load; fall back to defaults.
+- [x] **3 — Renderers consume `meta.style_bands`** | **Sonnet** | DONE session 55.
+  `persist::Db` (nudge-svc) gained a `meta` table (byte-identical to the app's) + read-only `get_meta`.
+  `tasklist.rs`: `outline()` now takes a `bands: &[COLORREF]` palette (empty → falls back to the built-in
+  `OUTLINE_BANDS`); new `parse_bands`/`parse_hex_color` turn `#RRGGBB` strings into `COLORREF`s, dropping
+  unparseable entries rather than blanking the whole set. `TaskList::create` takes `bands` and threads it
+  through the paint-state mutex alongside rows/now. Read point: `main.rs`'s `Effect::ShowTaskList` arm
+  reads `meta.style_bands` fresh every time the list is shown (Style tab has no reload signal of its own,
+  so re-reading per-show is simpler than threading it through rules reload). `overlay.rs` (anchor strip)
+  never referenced band colors — only `tasklist.rs` needed this. 153 workspace tests green (up from 148),
+  svc + app builds clean. Not committed. Not live-driven (no visible band-color change to eyeball without
+  a live check-in list + a Style-tab edit in the same session — static verify only: unit tests cover
+  parse/fallback/clamp).
 
 - [ ] **4 — Deadline-only tasks (no time-of-day) + undated-once suggestions** | **Sonnet** | ~2h
   Deferred from 10e: a once task with a deadline date but no `minutes` produces no window
