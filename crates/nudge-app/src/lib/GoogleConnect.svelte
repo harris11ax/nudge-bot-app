@@ -13,17 +13,30 @@
   // 10a: OAuth plumbing (google/mod.rs + oauth.rs). 10b adds the per-calendar
   // overlay checkboxes below, driving what the Calendar tab renders. 10c adds
   // the primary-calendar picker: the single calendar create/edit events write to.
-  let status = $state("not_configured");
+  let status = $state("loading");
   let connecting = $state(false);
   let error = $state("");
   let calendars = $state(/** @type {Array} */ ([]));
   let primary = $state(/** @type {string | null} */ (null));
 
   async function load() {
-    status = await googleStatus();
-    if (status === "connected") {
-      await loadCalendars();
-      await loadPrimary();
+    // Don't leave the default state on screen if the status call loses a
+    // launch-timing race — retry a few times, then surface the real error
+    // instead of the misleading "not_configured" message.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        status = await googleStatus();
+        error = "";
+        if (status === "connected") {
+          await loadCalendars();
+          await loadPrimary();
+        }
+        return;
+      } catch (err) {
+        status = "loading";
+        error = String(err);
+        await new Promise((r) => setTimeout(r, 300));
+      }
     }
   }
 
@@ -92,7 +105,9 @@
 
 <div class="card">
   <h2>Google</h2>
-  {#if status === "not_configured"}
+  {#if status === "loading"}
+    <p class="hint">Checking Google connection…</p>
+  {:else if status === "not_configured"}
     <p class="hint">
       No OAuth client configured. Create a Desktop-app OAuth client in Google Cloud Console, then
       save <code>{"{"}"client_id": "...", "client_secret": "..."{"}"}</code> to
