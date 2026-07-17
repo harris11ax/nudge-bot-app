@@ -3,9 +3,10 @@
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below
      for branch/commit/PR conventions now that this is a real remote, not just a local tree. -->
 
-Last completed: session 52 — Step 3 **DONE** (P5 verification: live drive + review). Review left 4
-non-blocking findings (task_id carry across check-ins, re-Pause was_started, logged_minutes truncation
-— see HISTORY session 52) — now step 1 below). Next: step 1 (Sonnet, unskippable). Full history: [HISTORY.md](HISTORY.md).
+Last completed: session 53 — Step 1 **DONE** (fixed session-52 review findings: task_id carry through
+CheckIn/Choosing/Paused, re-Pause was_started preservation, logged_minutes sub-minute accrual). 148
+workspace tests green, not committed. Next: step 2 (Sonnet — verify tray Pause submenu with a real
+click). Full history: [HISTORY.md](HISTORY.md).
 
 ## Next steps
 - [x] **10e — Gmail/GCal connectors** | **Opus** | ~1d — DONE session 41.
@@ -169,13 +170,16 @@ non-blocking findings (task_id carry across check-ins, re-Pause was_started, log
   Also lands here: a row click switching the live window to the *picked* task (P4 resolves the check-in but
   ignores the row's `task_id` — PLAN Tier C), and a tray Pause *submenu* of durations.
 
-- [ ] **1 — Fix session-52 review findings (task carry + pause + accrual)** | **Sonnet** | UNSKIPPABLE | ~2h
-  Four confirmed findings from the P5 review: (a) CheckIn/Choosing/Paused don't carry `Started.task_id`,
-  so any check-in resolution or classification rebinds to `ctx.window_task_id`, silently dropping a
-  Tier-C row-pick switch (state.rs ~560, ~653 — carry task_id through the check-in family);
-  (b) re-Pause while Paused loses `was_started` (`was_live` doesn't match `Paused`, state.rs ~386);
-  (c) `logged_minutes` accrual truncates `sample_secs/60` → 0 for sub-minute cadences (main.rs ~382 —
-  accrue seconds, convert at read). Extend the 145-test suite for each.
+- [x] **1 — Fix session-52 review findings (task carry + pause + accrual)** | **Sonnet** | DONE session 53.
+  (a) `State::CheckIn`/`Choosing`/`Paused` gained `task_id: Option<i64>`, threaded through resolution
+  arms and `quiet_tick`/`resume` (state.rs ~990-1097) so a Tier-C row-pick survives a check-in/pause
+  round-trip instead of resetting to `ctx.window_task_id`.
+  (b) Re-Pause while already `Paused` now preserves the existing `was_started`/`task_id` instead of
+  recomputing via `was_live()` (always false for `Paused`) — new `task_id_of()` helper, state.rs
+  ~1027-1037.
+  (c) `accrue_logged_minutes(&mut i64, i64) -> i64` extracted in main.rs; sub-minute sample cadences
+  now accrue a carried-seconds remainder instead of truncating to 0 minutes per tick.
+  148 workspace tests green (up from 145), builds clean. Not committed.
 
 - [ ] **2 — Verify tray Pause submenu with a real tray click** | **Sonnet** | ~30m
   Unexercised since P4 (synthetic input can't reach the tray menu). Step 2b scratch-config method +

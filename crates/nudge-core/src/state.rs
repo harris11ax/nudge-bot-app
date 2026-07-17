@@ -997,8 +997,15 @@ fn enter_quiet(state: State, now: UnixTime, resume_at: UnixTime, q: Quiet) -> (S
         // A break is only ever reached from a live task, so it always resumes to
         // one. A pause can come from anywhere — remember whether there was a task
         // in flight, so resuming doesn't nag the user to start what they were
-        // already doing.
-        Quiet::Pause => State::Paused { resume_at, was_started: was_live(state) },
+        // already doing. Re-pausing while already Paused must preserve the
+        // existing was_started/task_id rather than recomputing via was_live(),
+        // which would always be false for Paused (session-52 review finding b).
+        Quiet::Pause => match state {
+            State::Paused { was_started, task_id, .. } => {
+                State::Paused { resume_at, was_started, task_id }
+            }
+            _ => State::Paused { resume_at, was_started: was_live(state), task_id: task_id_of(state) },
+        },
         Quiet::Break => State::Break { resume_at },
     };
     (next, fx)
@@ -1016,6 +1023,19 @@ fn was_live(state: State) -> bool {
     )
 }
 
+/// The task_id carried by `state`, if any, used when entering Paused from a
+/// live state (session-52 review finding a: don't drop the picked task_id).
+fn task_id_of(state: State) -> Option<i64> {
+    match state {
+        State::Started { task_id, .. }
+        | State::CheckIn { task_id, .. }
+        | State::Choosing { task_id, .. }
+        | State::Paused { task_id, .. } => task_id,
+        State::Classifying { task_id, .. } => Some(task_id),
+        _ => None,
+    }
+}
+
 /// A wake while paused/on-break. Only expiry or an explicit `Resume` ends it;
 /// every other event re-arms the same bare edge and changes nothing, so a hotkey
 /// press, a reload, or a stray click cannot break the silence.
@@ -1023,6 +1043,7 @@ fn quiet_tick(
     state: State,
     resume_at: UnixTime,
     was_started: bool,
+    task_id: Option<i64>,
     q: Quiet,
     event: &Event,
     now: UnixTime,
@@ -1031,7 +1052,7 @@ fn quiet_tick(
     let over = matches!(event, Event::Resume(_))
         || (matches!(event, Event::EdgeTimer(_)) && now >= resume_at);
     if over {
-        return resume(was_started, now, ctx);
+        return resume(was_started, task_id, now, ctx);
     }
     let fx = vec![Effect::ArmEdgeTimer { at: resume_at, kind: q.edge() }];
     (state, fx)
@@ -1040,7 +1061,10 @@ fn quiet_tick(
 /// Come back from a pause/break: re-derive from the schedule as it stands *now*
 /// (it was never armed while quiet, so there is nothing stale to honour). A task
 /// that was live resumes live, with its runtime edges freshly armed from `now`.
-fn resume(was_started: bool, now: UnixTime, ctx: &ScheduleCtx) -> (State, Vec<Effect>) {
+/// `task_id` carries whatever task was live going into the pause (session-52
+/// review finding a) — it falls back to `ctx.window_task_id` when nothing was
+/// carried (e.g. resuming into Idle/Prompting from a pause with no task).
+fn resume(was_started: bool, task_id: Option<i64>, now: UnixTime, ctx: &ScheduleCtx) -> (State, Vec<Effect>) {
     let mut fx = vec![Effect::LogOutcome { outcome: Outcome::Resumed, at: now }];
     if !ctx.in_window {
         fx.push(Effect::LogEdge { entered: "idle", at: now, mode: None });
@@ -1059,7 +1083,7 @@ fn resume(was_started: bool, now: UnixTime, ctx: &ScheduleCtx) -> (State, Vec<Ef
                 sample_at,
                 off_task_since: None,
                 ontask_at,
-                task_id: ctx.window_task_id,
+                task_id: task_id.or(ctx.window_task_id),
             },
             fx,
         );
@@ -1071,7 +1095,7 @@ fn resume(was_started: bool, now: UnixTime, ctx: &ScheduleCtx) -> (State, Vec<Ef
             shown_at: now,
             snooze_until: None,
             mode: ctx.mode,
-            task_id: ctx.window_task_id,
+            task_id: task_id.or(ctx.window_task_id),
         },
         fx,
     )
@@ -1387,7 +1411,7 @@ mod tests {
         for st in [
             State::Prompting { shown_at: 1000, snooze_until: None, mode: Mode::OffTask, task_id: None },
             started(Some(4000)),
-            State::CheckIn { shown_at: 3000, kind: CheckInKind::Periodic },
+            State::CheckIn { shown_at: 3000, kind: CheckInKind::Periodic, task_id: None },
         ] {
             let (s, fx) = next(
                 st,
@@ -1601,7 +1625,7 @@ mod tests {
         assert_ne!(armed_kind(&fx), Some(EdgeKind::Sample));
 
         // A showing check-in.
-        let (_, fx) = next(State::CheckIn { shown_at: 3000, kind: CheckInKind::Periodic }, &Event::EdgeTimer(3100), &c);
+        let (_, fx) = next(State::CheckIn { shown_at: 3000, kind: CheckInKind::Periodic, task_id: None }, &Event::EdgeTimer(3100), &c);
         assert_ne!(armed_kind(&fx), Some(EdgeKind::Sample));
 
         // Sampling disabled by config: Started itself carries no sample edge.
@@ -1662,7 +1686,7 @@ mod tests {
     #[test]
     fn checkin_answer_resumes_or_stops_sampling() {
         let c = sampling_ctx(window_end(9999));
-        let (s, fx) = next(State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask }, &Event::Ack(1900), &c);
+        let (s, fx) = next(State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask, task_id: None }, &Event::Ack(1900), &c);
         assert_eq!(
             s,
             State::Started {
@@ -1674,7 +1698,7 @@ mod tests {
         assert_eq!(armed(&fx), Some((2200, EdgeKind::Sample)));
         assert!(fx.contains(&Effect::LogOutcome { outcome: Outcome::CheckedIn, at: 1900 }));
 
-        let (s2, fx2) = next(State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask }, &Event::Skip(1900), &c);
+        let (s2, fx2) = next(State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask, task_id: None }, &Event::Skip(1900), &c);
         assert_eq!(s2, started(None));
         assert_eq!(armed(&fx2), Some((9999, EdgeKind::WindowEnd)));
         assert!(fx2.contains(&Effect::LogOutcome { outcome: Outcome::Skipped, at: 1900 }));
@@ -1752,7 +1776,7 @@ mod tests {
         let mut c = listed_ctx(window_end(9999));
         c.foreground_on_task = false;
         let s = drifted(&c);
-        assert!(matches!(s, State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask }));
+        assert!(matches!(s, State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask, task_id: None }));
         let (_, fx) = next(
             State::Started { checkin_at: Some(1500), sample_at: None, off_task_since: None, ontask_at: None, task_id: None },
             &Event::EdgeTimer(1500),
@@ -1768,7 +1792,7 @@ mod tests {
     #[test]
     fn checkin_yes_resumes_the_task_and_sampling() {
         let c = listed_ctx(window_end(9999));
-        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask };
+        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask, task_id: None };
         let (s, fx) = next(st, &Event::CheckInYes(1900), &c);
         assert_eq!(
             s,
@@ -1784,9 +1808,9 @@ mod tests {
     #[test]
     fn checkin_no_shows_the_task_list_verbatim() {
         let c = listed_ctx(window_end(9999));
-        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask };
+        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask, task_id: None };
         let (s, fx) = next(st, &Event::CheckInNo(1900), &c);
-        assert!(matches!(s, State::Choosing { shown_at: 1900 }));
+        assert!(matches!(s, State::Choosing { shown_at: 1900, task_id: None }));
         assert!(fx.contains(&Effect::HidePrompt));
         assert!(fx.contains(&Effect::ShowTaskList { rows: c.task_rows.clone() }));
         assert!(fx.contains(&Effect::LogOutcome { outcome: Outcome::CheckedInNo, at: 1900 }));
@@ -1799,7 +1823,7 @@ mod tests {
     #[test]
     fn ignored_task_list_dismisses_at_the_schedule_edge() {
         let out = ctx(false, Some(Edge { at: 90_000, kind: EdgeKind::TaskStart }));
-        let (s, fx) = next(State::Choosing { shown_at: 1900 }, &Event::EdgeTimer(5000), &out);
+        let (s, fx) = next(State::Choosing { shown_at: 1900, task_id: None }, &Event::EdgeTimer(5000), &out);
         assert_eq!(s, State::Idle);
         assert!(fx.contains(&Effect::HideTaskList));
         assert_eq!(armed(&fx), Some((90_000, EdgeKind::TaskStart)));
@@ -1810,14 +1834,14 @@ mod tests {
     #[test]
     fn choosing_resolves_on_either_answer() {
         let c = listed_ctx(window_end(9999));
-        let (s, fx) = next(State::Choosing { shown_at: 1900 }, &Event::Ack(2000), &c);
+        let (s, fx) = next(State::Choosing { shown_at: 1900, task_id: None }, &Event::Ack(2000), &c);
         assert_eq!(
             s,
             State::Started { checkin_at: None, sample_at: Some(2300), off_task_since: None, ontask_at: None, task_id: None }
         );
         assert!(fx.contains(&Effect::HideTaskList));
 
-        let (s2, fx2) = next(State::Choosing { shown_at: 1900 }, &Event::Skip(2000), &c);
+        let (s2, fx2) = next(State::Choosing { shown_at: 1900, task_id: None }, &Event::Skip(2000), &c);
         assert_eq!(s2, started(None));
         assert!(fx2.contains(&Effect::HideTaskList));
         assert!(fx2.contains(&Effect::LogOutcome { outcome: Outcome::Skipped, at: 2000 }));
@@ -1828,7 +1852,7 @@ mod tests {
     #[test]
     fn break_from_the_list_silences_then_resumes_the_task() {
         let c = listed_ctx(window_end(99_999));
-        let (s, fx) = next(State::Choosing { shown_at: 1900 }, &Event::BreakFor(2000, 600), &c);
+        let (s, fx) = next(State::Choosing { shown_at: 1900, task_id: None }, &Event::BreakFor(2000, 600), &c);
         assert_eq!(s, State::Break { resume_at: 2600 });
         assert!(fx.contains(&Effect::HideTaskList));
         assert!(fx.contains(&Effect::LogOutcome { outcome: Outcome::BreakTaken, at: 2000 }));
@@ -1854,8 +1878,8 @@ mod tests {
             State::Idle,
             prompting(),
             State::Started { checkin_at: Some(2050), sample_at: Some(2050), off_task_since: None, ontask_at: None, task_id: None },
-            State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask },
-            State::Choosing { shown_at: 1900 },
+            State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask, task_id: None },
+            State::Choosing { shown_at: 1900, task_id: None },
         ] {
             let (s, fx) = next(st, &Event::PauseFor(2000, 600), &c);
             assert!(matches!(s, State::Paused { resume_at: 2600, .. }), "from {}", st.label());
@@ -1871,12 +1895,63 @@ mod tests {
         }
     }
 
+    // Pressing Pause again while already Paused must keep the original
+    // was_started/task_id, not recompute via was_live() (which is always false
+    // for Paused) — session-52 review finding b.
+    #[test]
+    fn re_pause_preserves_was_started_and_task_id() {
+        let c = listed_ctx(window_end(9999));
+        let paused = State::Paused { resume_at: 2600, was_started: true, task_id: Some(7) };
+        let (s, _) = next(paused, &Event::PauseFor(2100, 900), &c);
+        assert_eq!(s, State::Paused { resume_at: 3000, was_started: true, task_id: Some(7) });
+
+        let paused_false = State::Paused { resume_at: 2600, was_started: false, task_id: None };
+        let (s2, _) = next(paused_false, &Event::PauseFor(2100, 900), &c);
+        assert_eq!(s2, State::Paused { resume_at: 3000, was_started: false, task_id: None });
+    }
+
+    // A Tier-C row-pick that rebinds Started.task_id must survive a full
+    // check-in → choosing → pause → resume round trip back to Started, instead
+    // of being reset to ctx.window_task_id on resolution — session-52 review
+    // finding a.
+    #[test]
+    fn picked_task_id_survives_checkin_choosing_pause_round_trip() {
+        let c = listed_ctx(window_end(9999));
+
+        // Started, bound to task 9 (a row pick already switched away from the
+        // window's own task).
+        let started = State::Started {
+            checkin_at: Some(2050),
+            sample_at: None,
+            off_task_since: None,
+            ontask_at: None,
+            task_id: Some(9),
+        };
+        let (s1, _) = next(started, &Event::EdgeTimer(2050), &c);
+        assert!(matches!(s1, State::CheckIn { task_id: Some(9), .. }), "got {s1:?}");
+
+        // No carries it into Choosing (the §6.5 list).
+        let (s2, _) = next(s1, &Event::CheckInNo(2100), &c);
+        assert!(matches!(s2, State::Choosing { task_id: Some(9), .. }), "got {s2:?}");
+
+        // Pause from Choosing carries it into Paused. Choosing counts as "live"
+        // (the task was started; we're only asking what's next), so was_started
+        // is true.
+        let (s3, _) = next(s2, &Event::PauseFor(2200, 400), &c);
+        assert_eq!(s3, State::Paused { resume_at: 2600, was_started: true, task_id: Some(9) });
+
+        // Resume re-derives Started from the schedule, but keeps task 9 rather
+        // than falling back to ctx.window_task_id (which is None here).
+        let (s4, _) = next(s3, &Event::EdgeTimer(2600), &c);
+        assert!(matches!(s4, State::Started { task_id: Some(9), .. }), "got {s4:?}");
+    }
+
     // Nothing gets through a pause: no wake re-shows a prompt, and no event other
     // than expiry or Resume ends it.
     #[test]
     fn paused_stays_silent_until_expiry_or_resume() {
         let c = listed_ctx(window_end(2100));
-        let paused = State::Paused { resume_at: 2600, was_started: true };
+        let paused = State::Paused { resume_at: 2600, was_started: true, task_id: None };
         for ev in [
             Event::EdgeTimer(2500),
             Event::HotkeyToggle(2500),
@@ -1904,7 +1979,7 @@ mod tests {
 
         // Was started → Started, edges freshly armed from the resume instant.
         let (s, fx) = next(
-            State::Paused { resume_at: 2600, was_started: true },
+            State::Paused { resume_at: 2600, was_started: true, task_id: None },
             &Event::EdgeTimer(2600),
             &c,
         );
@@ -1917,7 +1992,7 @@ mod tests {
 
         // Was only prompting → back to the prompt, ladder restarted from now.
         let (s2, fx2) = next(
-            State::Paused { resume_at: 2600, was_started: false },
+            State::Paused { resume_at: 2600, was_started: false, task_id: None },
             &Event::Resume(2600),
             &c,
         );
@@ -1927,7 +2002,7 @@ mod tests {
         // Window closed during the pause → Idle, schedule edge armed.
         let out = ctx(false, Some(Edge { at: 90_000, kind: EdgeKind::TaskStart }));
         let (s3, fx3) = next(
-            State::Paused { resume_at: 2600, was_started: true },
+            State::Paused { resume_at: 2600, was_started: true, task_id: None },
             &Event::EdgeTimer(2600),
             &out,
         );
@@ -1969,7 +2044,7 @@ mod tests {
             task_id: None,
         };
         let (s, fx) = next(st, &Event::EdgeTimer(3000), &c);
-        assert!(matches!(s, State::CheckIn { shown_at: 3000, kind: CheckInKind::OnTask }));
+        assert!(matches!(s, State::CheckIn { shown_at: 3000, kind: CheckInKind::OnTask, task_id: None }));
         assert!(matches!(
             shown(&fx),
             Some(Effect::ShowPrompt { buttons: Buttons::TaskList, .. })
@@ -2051,12 +2126,12 @@ mod tests {
     #[test]
     fn checkin_yes_and_resume_rearm_the_ontask_tick() {
         let c = ontask_ctx(window_end(99_999));
-        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OnTask };
+        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OnTask, task_id: None };
         let (s, _) = next(st, &Event::CheckInYes(1900), &c);
         assert!(matches!(s, State::Started { ontask_at: Some(3700), .. }));
 
         let (s2, _) = next(
-            State::Paused { resume_at: 2600, was_started: true },
+            State::Paused { resume_at: 2600, was_started: true, task_id: None },
             &Event::EdgeTimer(2600),
             &c,
         );
@@ -2068,14 +2143,14 @@ mod tests {
     #[test]
     fn ontask_checkin_no_shows_list_and_ignored_dies() {
         let c = listed_ctx(window_end(99_999));
-        let st = State::CheckIn { shown_at: 3000, kind: CheckInKind::OnTask };
+        let st = State::CheckIn { shown_at: 3000, kind: CheckInKind::OnTask, task_id: None };
         let (s, fx) = next(st, &Event::CheckInNo(3100), &c);
-        assert!(matches!(s, State::Choosing { shown_at: 3100 }));
+        assert!(matches!(s, State::Choosing { shown_at: 3100, task_id: None }));
         assert!(fx.contains(&Effect::ShowTaskList { rows: c.task_rows.clone() }));
 
         let out = ctx(false, Some(Edge { at: 90_000, kind: EdgeKind::TaskStart }));
         let (s2, fx2) = next(
-            State::CheckIn { shown_at: 3000, kind: CheckInKind::OnTask },
+            State::CheckIn { shown_at: 3000, kind: CheckInKind::OnTask, task_id: None },
             &Event::EdgeTimer(5000),
             &out,
         );
@@ -2118,7 +2193,7 @@ mod tests {
     #[test]
     fn ontask_pick_enters_classification_for_the_picked_task() {
         let c = classify_ctx(window_end(99_999));
-        let st = State::CheckIn { shown_at: 3000, kind: CheckInKind::OnTask };
+        let st = State::CheckIn { shown_at: 3000, kind: CheckInKind::OnTask, task_id: None };
         let (s, fx) = next(st, &Event::PickTask(3100, 7), &c);
         assert_eq!(s, State::Classifying { task_id: 7, shown_at: 3100 });
         assert!(fx.contains(&Effect::HidePrompt));
@@ -2150,7 +2225,7 @@ mod tests {
 
         // OnTask picker, empty accumulator: no classification, but the pick
         // still rebinds and launches.
-        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OnTask };
+        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OnTask, task_id: None };
         let (s2, fx2) = next(st, &Event::PickTask(1900, 9), &c);
         assert!(matches!(s2, State::Started { task_id: Some(9), .. }));
         assert!(fx2.contains(&Effect::LaunchTools { task_id: 9 }));
@@ -2163,7 +2238,7 @@ mod tests {
     #[test]
     fn drift_yes_with_tools_enters_classification() {
         let c = classify_ctx(window_end(9999));
-        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask };
+        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask, task_id: Some(1) };
         let (s, fx) = next(st, &Event::CheckInYes(1900), &c);
         assert_eq!(s, State::Classifying { task_id: 1, shown_at: 1900 });
         assert!(fx.contains(&Effect::ShowClassify {
@@ -2179,7 +2254,7 @@ mod tests {
         // Empty accumulator → straight to Started.
         let mut c = classify_ctx(window_end(9999));
         c.classify_tools = Vec::new();
-        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask };
+        let st = State::CheckIn { shown_at: 1800, kind: CheckInKind::OffTask, task_id: None };
         let (s, _) = next(st, &Event::CheckInYes(1900), &c);
         assert!(matches!(s, State::Started { .. }));
 
@@ -2191,7 +2266,7 @@ mod tests {
 
         // Periodic Ack with tools in hand → still no classification.
         let c3 = classify_ctx(window_end(9999));
-        let per = State::CheckIn { shown_at: 1800, kind: CheckInKind::Periodic };
+        let per = State::CheckIn { shown_at: 1800, kind: CheckInKind::Periodic, task_id: None };
         let (s3, fx3) = next(per, &Event::Ack(1900), &c3);
         assert!(matches!(s3, State::Started { .. }));
         assert!(!fx3.iter().any(|e| matches!(e, Effect::ShowClassify { .. })));
@@ -2199,7 +2274,7 @@ mod tests {
         // A row pick is a Tier-C switch: Started binds to the picked task and
         // its tools get launched.
         let c4 = listed_ctx(window_end(9999));
-        let (s4, fx4) = next(State::Choosing { shown_at: 1900 }, &Event::PickTask(2000, 2), &c4);
+        let (s4, fx4) = next(State::Choosing { shown_at: 1900, task_id: None }, &Event::PickTask(2000, 2), &c4);
         assert!(matches!(s4, State::Started { task_id: Some(2), .. }));
         assert!(fx4.contains(&Effect::HideTaskList));
         assert!(fx4.contains(&Effect::LaunchTools { task_id: 2 }));
@@ -2279,7 +2354,7 @@ mod tests {
     fn no_sample_edge_while_paused_or_on_break() {
         let c = listed_ctx(window_end(9999));
         for st in [
-            State::Paused { resume_at: 2600, was_started: true },
+            State::Paused { resume_at: 2600, was_started: true, task_id: None },
             State::Break { resume_at: 2600 },
         ] {
             let (_, fx) = next(st, &Event::EdgeTimer(2500), &c);

@@ -133,6 +133,19 @@ fn task_list_due(state: State) -> bool {
     )
 }
 
+/// Fold `secs` of on-task sample time into `remainder` (seconds carried since
+/// the last whole minute was flushed), returning how many whole minutes are
+/// now ready to persist. `remainder` is left holding whatever's left over.
+/// `sample_secs` can be shorter than 60s (fast test configs), so a naive
+/// `secs / 60` truncates to 0 every tick and testing configs never accrue
+/// anything — session-52 review finding c.
+fn accrue_logged_minutes(remainder: &mut i64, secs: i64) -> i64 {
+    *remainder += secs;
+    let whole_minutes = *remainder / 60;
+    *remainder %= 60;
+    whole_minutes
+}
+
 /// Per-task progress for `display_list`, read straight off the `tasks` rows the
 /// svc already loaded this wake (`logged_minutes` is the cache it maintains at
 /// sample edges, so no AW re-scan happens here).
@@ -390,9 +403,7 @@ fn main() {
             if ctx.foreground_on_task {
                 if let (Some(id), Some(secs)) = (live_task, ctx.sample_secs) {
                     let remainder = logged_secs_remainder.entry(id).or_insert(0);
-                    *remainder += secs;
-                    let whole_minutes = *remainder / 60;
-                    *remainder %= 60;
+                    let whole_minutes = accrue_logged_minutes(remainder, secs);
                     if whole_minutes > 0 {
                         let logged = tasks.iter().find(|t| t.id == Some(id)).map_or(0, |t| t.logged_minutes);
                         res.db.set_logged_minutes(id, logged + whole_minutes as u32);
@@ -541,6 +552,23 @@ mod tests {
         }
     }
 
+    // Sub-minute sample cadence (e.g. 20s test configs) must still accrue
+    // logged_minutes over several ticks rather than truncating to 0 forever
+    // (session-52 review finding c).
+    #[test]
+    fn sub_minute_cadence_accrues_over_multiple_ticks() {
+        let mut remainder = 0i64;
+        assert_eq!(accrue_logged_minutes(&mut remainder, 20), 0);
+        assert_eq!(remainder, 20);
+        assert_eq!(accrue_logged_minutes(&mut remainder, 20), 0);
+        assert_eq!(remainder, 40);
+        // Third tick crosses the 60s boundary: one whole minute flushes, 20s carries.
+        assert_eq!(accrue_logged_minutes(&mut remainder, 20), 1);
+        assert_eq!(remainder, 0);
+        assert_eq!(accrue_logged_minutes(&mut remainder, 20), 0);
+        assert_eq!(remainder, 20);
+    }
+
     // The sample probe is paid for only on a due sample edge in Started.
     #[test]
     fn sample_due_gates_the_probe() {
@@ -553,7 +581,7 @@ mod tests {
         // Not Started.
         assert!(!sample_due(State::Idle, 9999, &Event::EdgeTimer(9999)));
         assert!(!sample_due(
-            State::CheckIn { shown_at: 1, kind: CheckInKind::Periodic },
+            State::CheckIn { shown_at: 1, kind: CheckInKind::Periodic, task_id: None },
             9999,
             &Event::EdgeTimer(9999)
         ));
@@ -565,13 +593,13 @@ mod tests {
     // a drift check-in, or the list it already opened (which a reload re-emits).
     #[test]
     fn task_list_due_gates_the_display_list() {
-        assert!(task_list_due(State::CheckIn { shown_at: 1, kind: CheckInKind::OffTask }));
-        assert!(task_list_due(State::Choosing { shown_at: 1 }));
+        assert!(task_list_due(State::CheckIn { shown_at: 1, kind: CheckInKind::OffTask, task_id: None }));
+        assert!(task_list_due(State::Choosing { shown_at: 1, task_id: None }));
         // The periodic check-in takes Start/Skip, not Yes/No — no list to build.
-        assert!(!task_list_due(State::CheckIn { shown_at: 1, kind: CheckInKind::Periodic }));
+        assert!(!task_list_due(State::CheckIn { shown_at: 1, kind: CheckInKind::Periodic, task_id: None }));
         assert!(!task_list_due(State::Idle));
         assert!(!task_list_due(started(Some(1500))));
-        assert!(!task_list_due(State::Paused { resume_at: 9, was_started: true }));
+        assert!(!task_list_due(State::Paused { resume_at: 9, was_started: true, task_id: None }));
     }
 
     // Progress comes off the rows already in hand: `logged_minutes` is the cache
