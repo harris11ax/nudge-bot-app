@@ -15,7 +15,7 @@
   const TABS = [
     { id: "planner", label: "Planner", icon: "▣" },
     { id: "calendar", label: "Calendar", icon: "▦" },
-    { id: "triggers", label: "Triggers", icon: "＋" },
+    { id: "triggers", label: "Tasks", icon: "＋" },
     { id: "settings", label: "Settings", icon: "⚙" },
     { id: "log", label: "Log", icon: "≡" },
   ];

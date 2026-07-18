@@ -67,7 +67,7 @@
 {:else}
   <header class="head">
     <h1>Planner</h1>
-    <button class="primary" onclick={onOpenTriggers}>＋ New trigger</button>
+    <button class="primary" onclick={onOpenTriggers}>＋ New task</button>
   </header>
 
   <div class="filters">

@@ -76,9 +76,8 @@
     title: "",
     desc: "",
     task_type: "",
-    time: "", // HH:MM → minutes on submit
     recur: "once",
-    deadline: "", // datetime-local → unix seconds on submit
+    deadline: "", // datetime-local → unix seconds on submit; also the fire time source
     mode_override: "",
     estimate: "", // minutes → estimate_minutes on submit
   });
@@ -87,10 +86,12 @@
   let formErr = $state("");
   let formOk = $state("");
 
-  function toMinutes(hhmm) {
-    if (!hhmm) return null;
-    const [h, m] = hhmm.split(":").map(Number);
-    return h * 60 + m;
+  // §7.1 Deadline-first: the fire `minutes` (since local midnight) derives from
+  // the Deadline's time-of-day — the Deadline is the single user-facing task time.
+  function minutesFromDeadline(dl) {
+    if (!dl) return null;
+    const d = new Date(dl);
+    return d.getHours() * 60 + d.getMinutes();
   }
 
   async function submitForm(e) {
@@ -105,7 +106,7 @@
       title: form.title.trim(),
       desc: form.desc,
       task_type: form.task_type,
-      minutes: toMinutes(form.time),
+      minutes: minutesFromDeadline(form.deadline),
       recur: form.recur.trim() || "once",
       deadline: form.deadline ? Math.floor(new Date(form.deadline).getTime() / 1000) : null,
       mode_override: form.mode_override || null,
@@ -117,7 +118,7 @@
         await setTaskTools(task.id, $state.snapshot(tools));
       }
       formOk = `Added: ${payload.title}`;
-      form = { title: "", desc: "", task_type: "", time: "", recur: "once", deadline: "", mode_override: "", estimate: "" };
+      form = { title: "", desc: "", task_type: "", recur: "once", deadline: "", mode_override: "", estimate: "" };
       tools = [];
     } catch (err) {
       formErr = String(err);
@@ -125,7 +126,41 @@
   }
 </script>
 
-<header class="head"><h1>Triggers</h1></header>
+<header class="head"><h1>Tasks</h1></header>
+
+<section class="card">
+  <h2>Quick add</h2>
+  <p class="hint">Format: <code>text @ time [recur]</code> — e.g. <code>gym @ 17:30 mon,wed,fri</code></p>
+  <form onsubmit={submitQuick} class="quickadd">
+    <input placeholder="gym @ 17:30 mon,wed,fri" bind:value={line} />
+    <button class="primary" type="submit">Add</button>
+  </form>
+  {#if quickErr}<p class="error">{quickErr}</p>{/if}
+  {#if quickOk}<p class="ok">{quickOk}</p>{/if}
+</section>
+
+<section class="card">
+  <h2>Full task</h2>
+  <form onsubmit={submitForm} class="grid">
+    <label>Title<input bind:value={form.title} required /></label>
+    <label>Type<input bind:value={form.task_type} placeholder="health, work…" /></label>
+    <label>Recur<input bind:value={form.recur} placeholder="once / daily / mon,wed,fri" /></label>
+    <label>Deadline<input type="datetime-local" bind:value={form.deadline} /></label>
+    <label>Mode
+      <select bind:value={form.mode_override}>
+        <option value="">Auto (classify at edge)</option>
+        <option value="off_task">Force strong (off-task)</option>
+        <option value="on_task">Force soft (on-task)</option>
+      </select>
+    </label>
+    <label>Estimate (min)<input type="number" min="0" bind:value={form.estimate} placeholder="90" /></label>
+    <label class="wide">Tools<ToolSelector bind:selected={tools} /></label>
+    <label class="wide">Description<textarea rows="2" bind:value={form.desc}></textarea></label>
+    <div class="wide"><button class="primary" type="submit">Create task</button></div>
+  </form>
+  {#if formErr}<p class="error">{formErr}</p>{/if}
+  {#if formOk}<p class="ok">{formOk}</p>{/if}
+</section>
 
 <section class="card">
   <div class="suggested-head">
@@ -153,41 +188,6 @@
   {:else}
     <p class="hint">No pending suggestions. Scan to pull actionable mail and upcoming events.</p>
   {/if}
-</section>
-
-<section class="card">
-  <h2>Quick add</h2>
-  <p class="hint">Format: <code>text @ time [recur]</code> — e.g. <code>gym @ 17:30 mon,wed,fri</code></p>
-  <form onsubmit={submitQuick} class="quickadd">
-    <input placeholder="gym @ 17:30 mon,wed,fri" bind:value={line} />
-    <button class="primary" type="submit">Add</button>
-  </form>
-  {#if quickErr}<p class="error">{quickErr}</p>{/if}
-  {#if quickOk}<p class="ok">{quickOk}</p>{/if}
-</section>
-
-<section class="card">
-  <h2>Full trigger</h2>
-  <form onsubmit={submitForm} class="grid">
-    <label>Title<input bind:value={form.title} required /></label>
-    <label>Type<input bind:value={form.task_type} placeholder="health, work…" /></label>
-    <label>Time of day<input type="time" bind:value={form.time} /></label>
-    <label>Recur<input bind:value={form.recur} placeholder="once / daily / mon,wed,fri" /></label>
-    <label>Deadline<input type="datetime-local" bind:value={form.deadline} /></label>
-    <label>Mode
-      <select bind:value={form.mode_override}>
-        <option value="">Auto (classify at edge)</option>
-        <option value="off_task">Force strong (off-task)</option>
-        <option value="on_task">Force soft (on-task)</option>
-      </select>
-    </label>
-    <label>Estimate (min)<input type="number" min="0" bind:value={form.estimate} placeholder="90" /></label>
-    <label class="wide">Tools<ToolSelector bind:selected={tools} /></label>
-    <label class="wide">Description<textarea rows="2" bind:value={form.desc}></textarea></label>
-    <div class="wide"><button class="primary" type="submit">Create trigger</button></div>
-  </form>
-  {#if formErr}<p class="error">{formErr}</p>{/if}
-  {#if formOk}<p class="ok">{formOk}</p>{/if}
 </section>
 
 <style>
