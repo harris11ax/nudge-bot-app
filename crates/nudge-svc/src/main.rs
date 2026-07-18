@@ -546,7 +546,7 @@ mod tests {
             minutes: None,
             recur: nudge_core::tasks::Recur::Once,
             mode_override: None,
-            trigger_source: nudge_core::tasks::TriggerSource::Manual,
+            task_source: nudge_core::tasks::TriggerSource::Manual,
             gcal_event_id: None,
             estimate_minutes: None,
             logged_minutes: 0,

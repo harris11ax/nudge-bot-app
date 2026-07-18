@@ -7,7 +7,7 @@
 //! full parse matrix is unit-testable off-line.
 //!
 //! Contract mirrors `add_task` (lib.rs): rows become `NewTaskForm` → `Task` →
-//! `Db::insert`. `trigger_source` is forced `Manual` downstream; `gcal_event_id`
+//! `Db::insert`. `task_source` is forced `Manual` downstream; `gcal_event_id`
 //! and `logged_minutes` are not importable. Header row is order-independent,
 //! case-insensitive, with a fixed alias map; extra columns are ignored. An
 //! unmappable/invalid row is *shown invalid*, never silently coerced.

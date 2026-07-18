@@ -33,7 +33,7 @@ impl Db {
                  minutes        INTEGER,
                  recur          TEXT    NOT NULL DEFAULT 'once',
                  mode_override  TEXT,
-                 trigger_source TEXT    NOT NULL DEFAULT 'manual',
+                 task_source TEXT    NOT NULL DEFAULT 'manual',
                  gcal_event_id  TEXT,
                  estimate_minutes INTEGER,
                  logged_minutes   INTEGER NOT NULL DEFAULT 0
@@ -76,6 +76,9 @@ impl Db {
         // migrated DB is expected and ignored — same idiom as the `sessions`
         // widening above. New rows read the documented defaults (estimate NULL →
         // "no estimate", logged 0).
+        // §7.1 rename: `trigger_source` → `task_source`. In-place rename on a
+        // pre-§7.1 DB; ignored (no such column) on a fresh/already-migrated one.
+        let _ = conn.execute("ALTER TABLE tasks RENAME COLUMN trigger_source TO task_source", []);
         for col in [
             "ALTER TABLE tasks ADD COLUMN estimate_minutes INTEGER",
             "ALTER TABLE tasks ADD COLUMN logged_minutes INTEGER NOT NULL DEFAULT 0",
@@ -149,7 +152,7 @@ impl Db {
     /// consumer here: nudge-app is the sole writer and signals changes via the
     /// existing `Local\nudge-bot-reload` event, at which point the svc re-reads.
     /// A malformed `recur` spec falls back to [`Recur::Once`] rather than dropping
-    /// the row, mirroring the tolerant `trigger_source` read-back. Ordered by id
+    /// the row, mirroring the tolerant `task_source` read-back. Ordered by id
     /// so callers see a stable sequence. The svc loop feeds these rows to
     /// [`nudge_core::schedule::context_with_tasks`] each wake (9e window-gen).
     pub fn tasks(&self) -> Vec<Task> {
@@ -157,7 +160,7 @@ impl Db {
             .conn
             .prepare(
                 "SELECT id, title, description, deadline, task_type, minutes,
-                        recur, mode_override, trigger_source, gcal_event_id,
+                        recur, mode_override, task_source, gcal_event_id,
                         estimate_minutes, logged_minutes
                  FROM tasks ORDER BY id",
             )
@@ -176,7 +179,7 @@ impl Db {
                     minutes: r.get::<_, Option<i64>>(5)?.map(|m| m as u32),
                     recur: Recur::parse(&recur_spec).unwrap_or(Recur::Once),
                     mode_override: mode_s.as_deref().and_then(parse_mode),
-                    trigger_source: TriggerSource::from_label(&source_s),
+                    task_source: TriggerSource::from_label(&source_s),
                     gcal_event_id: r.get(9)?,
                     estimate_minutes: r.get::<_, Option<i64>>(10)?.map(|m| m as u32),
                     logged_minutes: r.get::<_, i64>(11)? as u32,
@@ -299,7 +302,7 @@ mod tests {
             .execute(
                 "INSERT INTO tasks
                     (title, description, deadline, task_type, minutes,
-                     recur, mode_override, trigger_source, gcal_event_id)
+                     recur, mode_override, task_source, gcal_event_id)
                  VALUES ('gym', 'leg day', 1234, 'health', 1050,
                          'mon,wed,fri', 'on_task', 'gcal', 'evt_9')",
                 [],
@@ -324,7 +327,7 @@ mod tests {
         assert_eq!(gym.minutes, Some(1050));
         assert_eq!(gym.recur, Recur::Weekly(vec![0, 2, 4]));
         assert_eq!(gym.mode_override, Some(Mode::OnTask));
-        assert_eq!(gym.trigger_source, TriggerSource::Gcal);
+        assert_eq!(gym.task_source, TriggerSource::Gcal);
         assert_eq!(gym.gcal_event_id.as_deref(), Some("evt_9"));
         assert_eq!(gym.estimate_minutes, None); // unset → no estimate
         assert_eq!(gym.logged_minutes, 0); // column DEFAULT 0
@@ -334,7 +337,7 @@ mod tests {
         assert_eq!(mum.deadline, None);
         assert_eq!(mum.minutes, None);
         assert_eq!(mum.mode_override, None); // NULL → classify at edge
-        assert_eq!(mum.trigger_source, TriggerSource::Manual); // column DEFAULT
+        assert_eq!(mum.task_source, TriggerSource::Manual); // column DEFAULT
         assert_eq!(mum.gcal_event_id, None);
         assert_eq!(mum.logged_minutes, 0);
 
@@ -494,15 +497,18 @@ mod tests {
                      trigger_source TEXT    NOT NULL DEFAULT 'manual',
                      gcal_event_id  TEXT
                  );
-                 INSERT INTO tasks (title) VALUES ('legacy');",
+                 INSERT INTO tasks (title, trigger_source) VALUES ('legacy', 'gcal');",
             )
             .unwrap();
         }
-        // Opening runs the additive migration; the legacy row survives with defaults.
+        // Opening runs the additive migration: the pre-§7.1 `trigger_source`
+        // column is renamed to `task_source`, added columns get defaults, and the
+        // legacy row (with its source value) survives.
         let db = Db::open(path.clone());
         let tasks = db.tasks();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "legacy");
+        assert_eq!(tasks[0].task_source, TriggerSource::Gcal);
         assert_eq!(tasks[0].estimate_minutes, None);
         assert_eq!(tasks[0].logged_minutes, 0);
 

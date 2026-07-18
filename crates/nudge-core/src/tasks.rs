@@ -203,7 +203,7 @@ pub struct Task {
     /// Per-task override of the notification mode; `None` = classify at the edge
     /// from live activity as usual (the default path).
     pub mode_override: Option<Mode>,
-    pub trigger_source: TriggerSource,
+    pub task_source: TriggerSource,
     /// Google Calendar event id this task mirrors, if imported; `None` otherwise.
     pub gcal_event_id: Option<String>,
     /// Estimated work in minutes (§6.3); `None` = no estimate (window falls back
@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn trigger_source_labels_round_trip_unknown_to_manual() {
+    fn task_source_labels_round_trip_unknown_to_manual() {
         for s in [TriggerSource::Manual, TriggerSource::Gmail, TriggerSource::Gcal] {
             assert_eq!(TriggerSource::from_label(s.label()), s);
         }

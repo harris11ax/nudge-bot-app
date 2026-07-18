@@ -29,7 +29,7 @@
     <dd>{task.deadline != null ? `${deadlineLabel(task.deadline)} (${countdown(task.deadline, now)})` : "—"}</dd>
     <dt>Mode</dt>
     <dd>{task.mode_override === "off_task" ? "Force strong" : task.mode_override === "on_task" ? "Force soft" : "Auto"}</dd>
-    <dt>Source</dt><dd>{task.trigger_source}</dd>
+    <dt>Source</dt><dd>{task.task_source}</dd>
   </dl>
   <div class="detail-actions">
     <button class="danger" onclick={del}>Delete task</button>

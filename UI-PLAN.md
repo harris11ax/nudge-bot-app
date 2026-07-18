@@ -139,7 +139,8 @@ Applies everywhere "due ≤48 h" appeared (§6.4, §6.5, sidebar top). Sooner de
 
 ### 7.1 Nomenclature: Trigger → Task, start time → Deadline
 - **Global rename:** the user-facing entity/tab formerly called **Trigger/Triggers** is now **Task/Tasks** everywhere it surfaces (left-sidebar tab, headers, form labels, notification copy, Suggested inbox). Framing: the app's job is to get the user's attention and remind them to complete their **Tasks**.
-- **Deadline label:** the field previously shown as the task's *start time* is labelled **Deadline** consistently in every surface (Quick Add, task page, calendar, sidebar, notifications).
+- **Deadline label:** the field previously shown as the task's *start time* is labelled **Deadline** consistently in every surface (Quick Add, task page, calendar, sidebar, notifications). **Decision (2026-07-18): field-semantics change, not display-only** — the primary user-facing task time is the hard `deadline` (unix, already the sole key of `display_list`); the fire `minutes` is *derived* from it (mirrors step 4 deadline-only tasks + CSV import). Forms bind to `deadline`; `minutes` follows.
+- **Status (session 58):** backend done — DB column / DTO-JSON API / `Task` field `trigger_source`→`task_source` (both crates byte-identical, back-compat `RENAME COLUMN` migration + legacy-DB test; internal `TriggerSource` type unchanged). Remaining: Svelte relabel + Deadline-first form binding + Tasks-tab reorder.
 - **Code note (non-user-facing):** internal timing terms may keep "trigger edge"/"firing edge" since those name the scheduler edge, not the entity. DB/API: rename the user-facing field concept `trigger_source` → `task_source`; keep migration back-compat. This is a rename-only pass (Contractor), no behavior change.
 - **Tasks tab ordering:** **Quick Add** pinned at **top**; **Suggested** moved to the **bottom** (was inline "Import lane"). Task list sits between them.
 

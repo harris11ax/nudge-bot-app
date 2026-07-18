@@ -67,7 +67,7 @@ impl Store {
                  minutes        INTEGER,
                  recur          TEXT    NOT NULL DEFAULT 'once',
                  mode_override  TEXT,
-                 trigger_source TEXT    NOT NULL DEFAULT 'manual',
+                 task_source TEXT    NOT NULL DEFAULT 'manual',
                  gcal_event_id  TEXT,
                  estimate_minutes INTEGER,
                  logged_minutes   INTEGER NOT NULL DEFAULT 0
@@ -133,6 +133,10 @@ impl Store {
                  created_unix   INTEGER NOT NULL DEFAULT 0
              );",
         )?;
+        // §7.1 rename: the user-facing `trigger_source` column is now `task_source`.
+        // On a pre-§7.1 DB this renames in place; on a fresh/already-migrated DB the
+        // column doesn't exist and the error is ignored (same tolerant idiom below).
+        let _ = conn.execute("ALTER TABLE tasks RENAME COLUMN trigger_source TO task_source", []);
         // Additive migration for a pre-Phase-2 `tasks` table (§3), mirroring
         // persist.rs: duplicate-column errors on an already-migrated DB are ignored.
         for col in [
@@ -145,11 +149,11 @@ impl Store {
     }
 
     /// All tasks, ordered by id (stable). Tolerant read-back mirrors the svc:
-    /// a malformed `recur` → [`Recur::Once`], unknown `trigger_source` → Manual.
+    /// a malformed `recur` → [`Recur::Once`], unknown `task_source` → Manual.
     pub fn list(&self) -> rusqlite::Result<Vec<Task>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, title, description, deadline, task_type, minutes,
-                    recur, mode_override, trigger_source, gcal_event_id,
+                    recur, mode_override, task_source, gcal_event_id,
                     estimate_minutes, logged_minutes
              FROM tasks ORDER BY id",
         )?;
@@ -166,7 +170,7 @@ impl Store {
                 minutes: r.get::<_, Option<i64>>(5)?.map(|m| m as u32),
                 recur: Recur::parse(&recur_spec).unwrap_or(Recur::Once),
                 mode_override: mode_s.as_deref().and_then(parse_mode),
-                trigger_source: TriggerSource::from_label(&source_s),
+                task_source: TriggerSource::from_label(&source_s),
                 gcal_event_id: r.get(9)?,
                 estimate_minutes: r.get::<_, Option<i64>>(10)?.map(|m| m as u32),
                 logged_minutes: r.get::<_, i64>(11)? as u32,
@@ -182,7 +186,7 @@ impl Store {
         self.conn.execute(
             "INSERT INTO tasks
                 (title, description, deadline, task_type, minutes,
-                 recur, mode_override, trigger_source, gcal_event_id, estimate_minutes)
+                 recur, mode_override, task_source, gcal_event_id, estimate_minutes)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             rusqlite::params![
                 t.title,
@@ -192,7 +196,7 @@ impl Store {
                 t.minutes.map(|m| m as i64),
                 t.recur.to_spec(),
                 mode_label(t.mode_override),
-                t.trigger_source.label(),
+                t.task_source.label(),
                 t.gcal_event_id,
                 t.estimate_minutes.map(|m| m as i64),
             ],
@@ -423,7 +427,7 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Accept a suggestion: insert it into `tasks` (trigger_source carried over),
+    /// Accept a suggestion: insert it into `tasks` (task_source carried over),
     /// mark the suggestion accepted, and return the new task's rowid. Rejects if
     /// the suggestion isn't pending (already accepted/dismissed, or unknown id).
     pub fn accept_suggested_trigger(&self, id: i64) -> rusqlite::Result<i64> {
@@ -457,7 +461,7 @@ impl Store {
             minutes,
             recur: Recur::Once,
             mode_override: None,
-            trigger_source: TriggerSource::from_label(&row.source),
+            task_source: TriggerSource::from_label(&row.source),
             gcal_event_id: row.gcal_event_id,
             estimate_minutes: None,
             logged_minutes: 0,
@@ -701,7 +705,7 @@ mod tests {
             minutes: None,
             recur: Recur::Once,
             mode_override: None,
-            trigger_source: TriggerSource::Manual,
+            task_source: TriggerSource::Manual,
             gcal_event_id: None,
             estimate_minutes: Some(90),
             logged_minutes: 7, // ignored by insert (svc-owned)
@@ -783,7 +787,7 @@ mod tests {
             minutes: None,
             recur: Recur::Once,
             mode_override: None,
-            trigger_source: TriggerSource::Manual,
+            task_source: TriggerSource::Manual,
             gcal_event_id: None,
             estimate_minutes: None,
             logged_minutes: 0,
