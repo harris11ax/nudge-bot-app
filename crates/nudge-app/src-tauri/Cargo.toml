@@ -45,9 +45,6 @@ windows = { version = "0.61", features = [
     "Win32_System_DataExchange",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Security_Cryptography",
-    # TEMPORARY: Phase-1 launch probe parent-process lookup (launch_probe.rs).
-    # Remove at Phase 5 with the probe.
-    "Win32_System_Diagnostics_ToolHelp",
 ] }
 
 [features]

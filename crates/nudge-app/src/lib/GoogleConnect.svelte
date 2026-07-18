@@ -113,6 +113,14 @@
       save <code>{"{"}"client_id": "...", "client_secret": "..."{"}"}</code> to
       <code>%LOCALAPPDATA%\nudge-bot\google_client.json</code>.
     </p>
+  {:else if status === "misconfigured"}
+    <p class="hint">
+      <code>%LOCALAPPDATA%\nudge-bot\google_client.json</code> exists but couldn't be read as valid
+      JSON. It must contain exactly
+      <code>{"{"}"client_id": "...", "client_secret": "..."{"}"}</code> (or the Google-downloaded
+      <code>{"{"}"installed": {"{"}…{"}"}{"}"}</code> file), saved as plain UTF-8. Fix the file
+      contents and relaunch.
+    </p>
   {:else}
     <p class={status === "connected" ? "ok" : "hint"}>
       {status === "connected" ? "Connected" : "Not connected"}

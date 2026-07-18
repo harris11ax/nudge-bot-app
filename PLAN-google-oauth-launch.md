@@ -59,7 +59,11 @@ Consequence: **Phase 3 (known-folder) and Phase 4 (launcher hardening) are NOT t
 3. Add a **single-instance guard** (named mutex/`CreateMutexW`) so a half-initialized process can't shadow a good one.
 4. Decide whether to keep `additionalBrowserArgs: --disable-http-cache` in `tauri.conf.json` (from the disproven cache theory — harmless; recommend removing to reduce noise once fix confirmed).
 
-## Phase 5 — Verify + clean up
+## RESOLUTION (2026-07-17)
+Root cause was **user file content**, not launch context: the real native `google_client.json` held pasted Rust source (`pub struct ClientConfig { … }`, 205 bytes) instead of JSON → `parse=none` → `not_configured`. User rewrote it with valid JSON (145 bytes) via a native shell; `.vbs` launch then connected. Phases 3–4 (known-folder / launcher hardening) unneeded.
+Done: Phase-1 probe fully removed (`launch_probe.rs` deleted, `mod`/calls/`Win32_System_Diagnostics_ToolHelp` feature reverted), `%TEMP%\nudge-google-debug.log` deleted. Product fix: added `ConnectState::Misconfigured` (file present but unparseable/unreadable) + a distinct frontend message so a malformed file no longer masquerades as "missing". App rebuilt.
+
+## Phase 5 — Verify + clean up (probe removal + fix DONE above)
 1. **User** verifies via their normal double-click, from a **cold boot** — Google tab shows correct state without any shell/Claude step. (`verification-before-completion`: evidence before claiming done.)
 2. Remove the Phase-1 probe code; delete `%TEMP%\nudge-google-debug.log`.
 3. Reconcile `BUG-google-oauth-notconfigured.md` → history; update `HISTORY.md` via `nextsteps-classifier`; check off the step in `NEXTSTEPS.md`.
