@@ -34,7 +34,18 @@ Result: probe module `launch_probe.rs` added; `google_status` + startup logging 
 3. Diff the two `nudge-google-debug.log` lines. Expected differing field: `LOCALAPPDATA` raw / resolved path / byte count (H1). If identical env but divergent read → re-rank to H2/H4.
 4. Record the decisive field in this file before writing any fix.
 
-## Phase 3 — Fix (branch on the pinned cause)
+## Phase 2 RESULT (2026-07-17) — root cause pinned
+Decisive diff (`%TEMP%\nudge-google-debug.log`):
+- shell/Claude launch: `localappdata=Ok(C:\Users\harri\AppData\Local) path=…\nudge-bot\google_client.json read=ok bytes=145 parse=some state=connected`
+- user `.vbs`/`wscript` launch (reproduced twice): **same** env + **same** path string, but `read=ok bytes=205 parse=none state=not_configured`.
+
+**H1/H2 disproven** — env + resolved path identical. Decisive differing field = **file content (bytes/parse)**, not launch context.
+
+Cause: **MSIX filesystem redirection.** Claude Code runs inside the `Claude_pzs8sxrjxfjjc` app container (proven: filesystem-MCP allowed dir is under `…\Packages\Claude_pzs8sxrjxfjjc\LocalCache\…`). Container-launched processes (Claude's shell launch of nudge-app, all of Claude's file tools) have `%LOCALAPPDATA%` transparently redirected to `…\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Local\nudge-bot\`, which holds a **good 145-byte** copy (written 07-12). The user's native `wscript` double-click reads the **true** `%LOCALAPPDATA%\nudge-bot\google_client.json`, which is **205 bytes and unparseable**. Same env-var string in both; two different physical files. Every "shell works" observation was the container copy — Claude's tools cannot see the real file.
+
+Consequence: **Phase 3 (known-folder) and Phase 4 (launcher hardening) are NOT the fix** — path resolution is correct. Real fix = correct the user's real native `google_client.json` content (user runs it in a native shell; Claude's shell is redirected and can't reach the real path). Optional product improvement: make `google_status` distinguish "present but unparseable" from "absent" so a malformed file isn't silently reported as `not_configured`.
+
+## Phase 3 — Fix (branch on the pinned cause) — SUPERSEDED (see Phase 2 result)
 - **If H1 (env/path — most likely):** stop trusting ambient `LOCALAPPDATA`.
   - Primary: resolve config dir via Win32 **known-folder API** `SHGetKnownFolderPath(FOLDERID_LocalAppData)` (`windows`/`windows-sys` crate, already an indirect dep via tauri) — immune to a mangled env block. Wrap in `config_dir()`; keep env var only as a logged fallback.
   - Apply the **same** resolution in `nudge-svc`'s `dirs_config()` so app+svc still agree on the shared dir (they share `sessions.db`/tokens — must not diverge).
