@@ -108,12 +108,60 @@ pub enum ConnectState {
 
 #[tauri::command]
 pub fn google_status() -> ConnectState {
-    if load_client_config().is_none() {
-        return ConnectState::NotConfigured;
-    }
-    match TokenCache::load() {
-        Some(_) => ConnectState::Connected,
-        None => ConnectState::Disconnected,
+    // TEMPORARY: Phase-1 diagnostic probe (PLAN-google-oauth-launch.md). Logs the
+    // full env/path/read outcome so the user's launch vs a shell launch can be
+    // diffed. Remove at Phase 5.
+    let path = client_config_path();
+    let localappdata = match std::env::var("LOCALAPPDATA") {
+        Ok(v) => format!("Ok({v})"),
+        Err(e) => format!("Err({e})"),
+    };
+    let read = std::fs::read(&path);
+    let (read_outcome, bytes) = match &read {
+        Ok(b) => ("ok", b.len() as i64),
+        Err(e) => {
+            // keep the kind for the diff (NotFound vs PermissionDenied etc.)
+            (kind_str(e.kind()), -1)
+        }
+    };
+    let parsed = read.as_ref().ok().and_then(|b| parse_client_config(b));
+    let parse_outcome = if read.is_err() {
+        "n/a"
+    } else if parsed.is_some() {
+        "some"
+    } else {
+        "none"
+    };
+
+    let state = if parsed.is_none() {
+        ConnectState::NotConfigured
+    } else {
+        match TokenCache::load() {
+            Some(_) => ConnectState::Connected,
+            None => ConnectState::Disconnected,
+        }
+    };
+    let state_str = match state {
+        ConnectState::NotConfigured => "not_configured",
+        ConnectState::Disconnected => "disconnected",
+        ConnectState::Connected => "connected",
+    };
+    crate::launch_probe::probe_log(
+        "google_status",
+        &format!(
+            "localappdata={localappdata:?} path={:?} read={read_outcome} bytes={bytes} parse={parse_outcome} state={state_str}",
+            path.display().to_string()
+        ),
+    );
+    state
+}
+
+/// Compact label for an io ErrorKind, for the probe diff.
+fn kind_str(k: std::io::ErrorKind) -> &'static str {
+    match k {
+        std::io::ErrorKind::NotFound => "not_found",
+        std::io::ErrorKind::PermissionDenied => "perm_denied",
+        _ => "other_err",
     }
 }
 

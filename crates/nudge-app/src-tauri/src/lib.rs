@@ -9,6 +9,8 @@ mod db;
 mod google;
 #[cfg(windows)]
 mod ipc;
+// TEMPORARY: Phase-1 diagnostic probe (PLAN-google-oauth-launch.md). Remove at Phase 5.
+mod launch_probe;
 
 use db::{CalendarRow, EventRow, Store, SuggestedTriggerRow};
 use google::calendar::EventInfo;
@@ -743,6 +745,9 @@ fn refresh_app_usage(force: bool) -> Result<i64, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // TEMPORARY: Phase-1 startup probe (PLAN-google-oauth-launch.md). Remove at Phase 5.
+    launch_probe::probe_startup();
+
     #[cfg(windows)]
     let pending_task = ipc::cli_task_id();
     #[cfg(not(windows))]
