@@ -103,7 +103,7 @@ fn add_quickadd(line: String) -> Result<TaskDto, String> {
 /// Fallback structured form (Triggers tab). `recur` accepts the same grammar as
 /// quick-add (`once` / keyword / day list). `minutes` is optional (deadline-only
 /// tasks). `mode_override` is `"off_task"`, `"on_task"`, or absent.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct NewTaskForm {
     pub title: String,
     #[serde(default)]
@@ -123,8 +123,10 @@ fn once_spec() -> String {
     "once".to_string()
 }
 
-#[tauri::command]
-fn add_task(form: NewTaskForm) -> Result<TaskDto, String> {
+/// Validate + convert a `NewTaskForm` into a domain `Task` (source forced
+/// `Manual`). Shared by `add_task` and the CSV batch import so both apply the
+/// same title/recur/mode checks server-side.
+fn form_to_task(form: NewTaskForm) -> Result<Task, String> {
     let title = form.title.trim();
     if title.is_empty() {
         return Err("title is empty".into());
@@ -135,7 +137,7 @@ fn add_task(form: NewTaskForm) -> Result<TaskDto, String> {
         Some("on_task") => Some(Mode::OnTask),
         _ => None,
     };
-    let task = Task {
+    Ok(Task {
         id: None,
         title: title.to_string(),
         desc: form.desc,
@@ -148,8 +150,44 @@ fn add_task(form: NewTaskForm) -> Result<TaskDto, String> {
         gcal_event_id: None,
         estimate_minutes: form.estimate_minutes,
         logged_minutes: 0,
-    };
-    insert_and_reload(task)
+    })
+}
+
+#[tauri::command]
+fn add_task(form: NewTaskForm) -> Result<TaskDto, String> {
+    insert_and_reload(form_to_task(form)?)
+}
+
+/// Parse a CSV blob into per-row verdicts for the filter screen (P2). Pure
+/// validation — nothing is written; the UI decides which rows to import.
+#[tauri::command]
+fn validate_csv_import(text: String) -> Vec<csv_import::ImportRowDto> {
+    csv_import::parse_import(&text)
+        .into_iter()
+        .map(csv_import::ImportRowDto::from)
+        .collect()
+}
+
+/// Import a batch of client-approved rows in ONE transaction, then signal the
+/// svc ONCE. Every row is re-validated server-side (`form_to_task`) — the client
+/// toggle is not trusted — and any failure aborts the whole batch. Returns the
+/// number of tasks written.
+#[tauri::command]
+fn import_tasks(rows: Vec<NewTaskForm>) -> Result<usize, String> {
+    if rows.is_empty() {
+        return Err("no rows to import".into());
+    }
+    let tasks: Vec<Task> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, form)| form_to_task(form).map_err(|e| format!("row {}: {e}", i + 1)))
+        .collect::<Result<_, _>>()?;
+    let mut store = open()?;
+    let ids = store
+        .insert_batch(&tasks)
+        .map_err(|e| format!("import insert: {e}"))?;
+    db::signal_reload();
+    Ok(ids.len())
 }
 
 /// Task id passed via `--task <id>` on a cold-start launch (9d-ii click-through).
@@ -761,6 +799,8 @@ pub fn run() {
             list_tasks,
             add_quickadd,
             add_task,
+            validate_csv_import,
+            import_tasks,
             delete_task,
             get_pending_task,
             google::google_status,

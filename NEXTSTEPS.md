@@ -2,7 +2,7 @@
 <!-- Boundary: forward-looking task queue only. Completed-step detail lives in HISTORY.md.
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below. -->
 
-Last completed: session 57 — Step 5 (custom pause duration via `[escalation] custom_pause_secs`).
+Last completed: session 59 — Step 7 P2 (CSV import tauri cmds + batch insert).
 Next open: **step 9** (UI-PLAN §7 rework — planned, [UI-PLAN.md](UI-PLAN.md) §7), **step 7** (CSV bulk task
 import — planned, [PLAN-csv-import.md](PLAN-csv-import.md)) and **step 8** (fix Gmail scan 403). Step 6
 (nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
@@ -21,8 +21,9 @@ import — planned, [PLAN-csv-import.md](PLAN-csv-import.md)) and **step 8** (fi
   `title,description,deadline,time_of_day,recur,task_type,estimate_minutes,mode`. Must ship a
   **"Download blank template.csv"** button (header-only file to hand off to the LLM) and a "Copy LLM prompt"
   button. Phases (one per session): **P1 ✅ DONE (session 58)** pure `csv_import.rs` parser + validation (11 unit tests green, no I/O);
-  **P2 (next)** tauri cmds `validate_csv_import`/`import_tasks` (single transaction + ONE reload for the whole batch,
-  not per row) + `generate_handler!` registration; **P3** `CsvImport.svelte` filter screen + Sidebar entry +
+  **P2 ✅ DONE (session 59)** `Store::insert_batch` (single sqlite transaction), `ImportRowDto`, tauri cmds
+  `validate_csv_import`/`import_tasks` (server-side re-validation via shared `form_to_task`, ONE `signal_reload`
+  for the whole batch) + `generate_handler!` registration. 58 app-lib tests green; **P3 (next)** `CsvImport.svelte` filter screen + Sidebar entry +
   template/prompt buttons; **P4** unit tests + live drive a mixed valid/broken CSV end-to-end. Out of scope:
   `.xlsx` ingestion, column-remap wizard.
 

@@ -204,6 +204,39 @@ impl Store {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Insert many tasks in a single transaction. Either every row lands or none
+    /// do (CSV bulk import, PLAN-csv-import.md §3 P2) — one commit, so the svc is
+    /// signalled once by the caller, not per row. Returns the new rowids in order.
+    pub fn insert_batch(&mut self, tasks: &[Task]) -> rusqlite::Result<Vec<i64>> {
+        let tx = self.conn.transaction()?;
+        let mut ids = Vec::with_capacity(tasks.len());
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO tasks
+                    (title, description, deadline, task_type, minutes,
+                     recur, mode_override, task_source, gcal_event_id, estimate_minutes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?;
+            for t in tasks {
+                stmt.execute(rusqlite::params![
+                    t.title,
+                    t.desc,
+                    t.deadline,
+                    t.task_type,
+                    t.minutes.map(|m| m as i64),
+                    t.recur.to_spec(),
+                    mode_label(t.mode_override),
+                    t.task_source.label(),
+                    t.gcal_event_id,
+                    t.estimate_minutes.map(|m| m as i64),
+                ])?;
+                ids.push(tx.last_insert_rowid());
+            }
+        }
+        tx.commit()?;
+        Ok(ids)
+    }
+
     /// Delete by rowid. Returns the number of rows removed (0 if not found).
     pub fn delete(&self, id: i64) -> rusqlite::Result<usize> {
         self.conn

@@ -16,6 +16,7 @@ use crate::NewTaskForm;
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
 use nudge_core::rules::parse_hhmm;
 use nudge_core::tasks::Recur;
+use serde::Serialize;
 
 /// Canonical field → accepted header aliases (all matched lower-cased + trimmed).
 /// The first entry of each row is the canonical name written by the template.
@@ -39,6 +40,28 @@ pub struct ImportRow {
     pub raw: Vec<(String, String)>,
     pub valid: bool,
     pub errors: Vec<String>,
+}
+
+/// Wire shape of one parsed record for the filter screen (P2). Carries the
+/// best-effort `form` (so the UI can render/edit mapped cells), the original
+/// (field, cell) pairs, and the validity verdict + per-field errors.
+#[derive(Serialize)]
+pub struct ImportRowDto {
+    pub form: NewTaskForm,
+    pub raw: Vec<(String, String)>,
+    pub valid: bool,
+    pub errors: Vec<String>,
+}
+
+impl From<ImportRow> for ImportRowDto {
+    fn from(r: ImportRow) -> Self {
+        ImportRowDto {
+            form: r.form,
+            raw: r.raw,
+            valid: r.valid,
+            errors: r.errors,
+        }
+    }
 }
 
 /// Resolve a header cell to its canonical field name, if recognized.
