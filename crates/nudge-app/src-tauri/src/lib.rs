@@ -5,6 +5,7 @@
 
 mod aw_usage;
 mod connectors;
+mod csv_import;
 mod db;
 mod google;
 #[cfg(windows)]

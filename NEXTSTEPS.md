@@ -3,10 +3,14 @@
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below. -->
 
 Last completed: session 57 — Step 5 (custom pause duration via `[escalation] custom_pause_secs`).
-Next open: **step 7** (CSV bulk task import — planned, [PLAN-csv-import.md](PLAN-csv-import.md)) and
-**step 8** (fix Gmail scan 403). Step 6 (nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
+Next open: **step 9** (UI-PLAN §7 rework — planned, [UI-PLAN.md](UI-PLAN.md) §7), **step 7** (CSV bulk task
+import — planned, [PLAN-csv-import.md](PLAN-csv-import.md)) and **step 8** (fix Gmail scan 403). Step 6
+(nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
 
 ## Open steps
+- [ ] **9 — UI-PLAN §7 rework: Tasks nomenclature, Task↔Event binding, Settings/Calendar, Tools launch** | **Opus** | ~2–3d | **PLANNED → [UI-PLAN.md](UI-PLAN.md) §7**
+  Requested 2026-07-18. Four areas: (a) **§7.1** rename Trigger→Task + start time→**Deadline** app-wide, reorder Tasks tab (Quick Add top / Suggested bottom), `trigger_source`→`task_source`; (b) **§7.2** bidirectional Task↔Calendar Event binding (auto-tie on create, default event = Deadline→Deadline+1h, edit propagation to GCal, Task-bound events excluded from Suggested, calendar event-click menu Add Task/Edit Event/Delete Event); (c) **§7.3** dedicated Settings → Calendar tab; (d) **§7.4** relabel/hide AW "Unknown (system/lock screen)" bucket, per-website resolution inside browsers, Launch-tool-from-task (web URL + Windows exe). Phase per session. **Open Q (user):** "Deadline" now labels the former *start* time — confirm display-only rename vs. field-semantics change before P1.
+
 - [ ] **7 — CSV bulk task import** | **Sonnet** | ~1–1.5d | **PLANNED → [PLAN-csv-import.md](PLAN-csv-import.md)**
   Bulk-add tasks from a `.csv`. Flow: user dumps a text task list → asks Claude/Gemini to shape it into
   the canonical CSV → uploads it → an intermediate **filter screen** flags each row import-ready vs. broken
@@ -16,8 +20,8 @@ Next open: **step 7** (CSV bulk task import — planned, [PLAN-csv-import.md](PL
   no polling, no in-app LLM/network** (the LLM shaping happens outside nudge-bot). Canonical header:
   `title,description,deadline,time_of_day,recur,task_type,estimate_minutes,mode`. Must ship a
   **"Download blank template.csv"** button (header-only file to hand off to the LLM) and a "Copy LLM prompt"
-  button. Phases (one per session): **P1** pure `csv_import.rs` parser + validation (unit-testable, no I/O);
-  **P2** tauri cmds `validate_csv_import`/`import_tasks` (single transaction + ONE reload for the whole batch,
+  button. Phases (one per session): **P1 ✅ DONE (session 58)** pure `csv_import.rs` parser + validation (11 unit tests green, no I/O);
+  **P2 (next)** tauri cmds `validate_csv_import`/`import_tasks` (single transaction + ONE reload for the whole batch,
   not per row) + `generate_handler!` registration; **P3** `CsvImport.svelte` filter screen + Sidebar entry +
   template/prompt buttons; **P4** unit tests + live drive a mixed valid/broken CSV end-to-end. Out of scope:
   `.xlsx` ingestion, column-remap wizard.
