@@ -36,6 +36,73 @@ fn local_minutes_of_day(unix: i64) -> u32 {
     }
 }
 
+/// One task + its (unresolved) hierarchy names, for [`Store::insert_bulk`]. The
+/// group/project strings resolve to a `project_id` inside the batch transaction.
+pub struct BulkInsert {
+    pub task: Task,
+    pub group: String,
+    pub project: String,
+}
+
+/// Connection-level `resolve_group_project` (PLAN-bulk-upload.md §2) so both the
+/// standalone [`Store::resolve_group_project`] and the batched [`Store::insert_bulk`]
+/// (which holds a live transaction) share one implementation. Exact NOCASE
+/// match-or-create: group first, then project under it; blank group ⇒ `Ok(None)`
+/// (a blank group with a non-blank project is an error); blank project ⇒ `Ok(None)`
+/// (the group row is still created so later rows reuse it). Trimmed names.
+fn resolve_group_project_conn(
+    conn: &rusqlite::Connection,
+    group: &str,
+    project: &str,
+) -> rusqlite::Result<Option<i64>> {
+    let group = group.trim();
+    let project = project.trim();
+    if group.is_empty() {
+        if !project.is_empty() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                "project without a group".into(),
+            ));
+        }
+        return Ok(None);
+    }
+    // Match-or-create the group (name UNIQUE COLLATE NOCASE).
+    let group_id: i64 = match conn.query_row(
+        "SELECT id FROM project_groups WHERE name = ?1 COLLATE NOCASE",
+        rusqlite::params![group],
+        |r| r.get(0),
+    ) {
+        Ok(id) => id,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            conn.execute(
+                "INSERT INTO project_groups (name) VALUES (?1)",
+                rusqlite::params![group],
+            )?;
+            conn.last_insert_rowid()
+        }
+        Err(e) => return Err(e),
+    };
+    if project.is_empty() {
+        return Ok(None);
+    }
+    // Match-or-create the project within the group (UNIQUE (group_id, name)).
+    let project_id: i64 = match conn.query_row(
+        "SELECT id FROM projects WHERE group_id = ?1 AND name = ?2 COLLATE NOCASE",
+        rusqlite::params![group_id, project],
+        |r| r.get(0),
+    ) {
+        Ok(id) => id,
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            conn.execute(
+                "INSERT INTO projects (group_id, name) VALUES (?1, ?2)",
+                rusqlite::params![group_id, project],
+            )?;
+            conn.last_insert_rowid()
+        }
+        Err(e) => return Err(e),
+    };
+    Ok(Some(project_id))
+}
+
 pub struct Store {
     conn: rusqlite::Connection,
 }
@@ -274,52 +341,47 @@ impl Store {
         group: &str,
         project: &str,
     ) -> rusqlite::Result<Option<i64>> {
-        let group = group.trim();
-        let project = project.trim();
-        if group.is_empty() {
-            if !project.is_empty() {
-                return Err(rusqlite::Error::InvalidParameterName(
-                    "project without a group".into(),
-                ));
+        resolve_group_project_conn(&self.conn, group, project)
+    }
+
+    /// Confirm a bulk upload (PLAN-bulk-upload.md §7 P4): resolve each row's
+    /// hierarchy (match-or-create group+project) and insert the task with its
+    /// `project_id`, all in ONE transaction — either the whole batch lands or none
+    /// does. The caller signals the svc exactly once after commit. Returns the new
+    /// rowids in order. A row whose group/project is unmappable (project without a
+    /// group) aborts the batch.
+    pub fn insert_bulk(&mut self, items: &[BulkInsert]) -> rusqlite::Result<Vec<i64>> {
+        let tx = self.conn.transaction()?;
+        let mut ids = Vec::with_capacity(items.len());
+        {
+            let mut stmt = tx.prepare(
+                "INSERT INTO tasks
+                    (title, description, deadline, task_type, minutes,
+                     recur, mode_override, task_source, gcal_event_id,
+                     estimate_minutes, project_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            )?;
+            for it in items {
+                let project_id = resolve_group_project_conn(&tx, &it.group, &it.project)?;
+                let t = &it.task;
+                stmt.execute(rusqlite::params![
+                    t.title,
+                    t.desc,
+                    t.deadline,
+                    t.task_type,
+                    t.minutes.map(|m| m as i64),
+                    t.recur.to_spec(),
+                    mode_label(t.mode_override),
+                    t.task_source.label(),
+                    t.gcal_event_id,
+                    t.estimate_minutes.map(|m| m as i64),
+                    project_id,
+                ])?;
+                ids.push(tx.last_insert_rowid());
             }
-            return Ok(None);
         }
-        // Match-or-create the group (name UNIQUE COLLATE NOCASE).
-        let group_id: i64 = match self.conn.query_row(
-            "SELECT id FROM project_groups WHERE name = ?1 COLLATE NOCASE",
-            rusqlite::params![group],
-            |r| r.get(0),
-        ) {
-            Ok(id) => id,
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                self.conn.execute(
-                    "INSERT INTO project_groups (name) VALUES (?1)",
-                    rusqlite::params![group],
-                )?;
-                self.conn.last_insert_rowid()
-            }
-            Err(e) => return Err(e),
-        };
-        if project.is_empty() {
-            return Ok(None);
-        }
-        // Match-or-create the project within the group (UNIQUE (group_id, name)).
-        let project_id: i64 = match self.conn.query_row(
-            "SELECT id FROM projects WHERE group_id = ?1 AND name = ?2 COLLATE NOCASE",
-            rusqlite::params![group_id, project],
-            |r| r.get(0),
-        ) {
-            Ok(id) => id,
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                self.conn.execute(
-                    "INSERT INTO projects (group_id, name) VALUES (?1, ?2)",
-                    rusqlite::params![group_id, project],
-                )?;
-                self.conn.last_insert_rowid()
-            }
-            Err(e) => return Err(e),
-        };
-        Ok(Some(project_id))
+        tx.commit()?;
+        Ok(ids)
     }
 
     /// Delete by rowid. Returns the number of rows removed (0 if not found).
@@ -975,6 +1037,93 @@ mod tests {
         let ids = store.insert_batch(&[]).unwrap();
         assert!(ids.is_empty());
         assert_eq!(store.list().unwrap().len(), 0);
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // Bulk Upload P4: insert_bulk resolves each row's hierarchy and writes the
+    // task with its project_id in one transaction; unfiled rows keep NULL, and
+    // two rows naming the same group+project share one project_id.
+    #[test]
+    fn insert_bulk_resolves_hierarchy_and_project_id() {
+        let (mut store, path) = temp_store("bulk");
+        let mk = |title: &str| Task {
+            id: None,
+            title: title.into(),
+            desc: String::new(),
+            deadline: None,
+            task_type: String::new(),
+            minutes: None,
+            recur: Recur::Once,
+            mode_override: None,
+            task_source: TriggerSource::Manual,
+            gcal_event_id: None,
+            estimate_minutes: None,
+            logged_minutes: 0,
+        };
+        let items = vec![
+            BulkInsert { task: mk("a"), group: "Work".into(), project: "Alpha".into() },
+            BulkInsert { task: mk("b"), group: "Work".into(), project: "Alpha".into() },
+            BulkInsert { task: mk("c"), group: String::new(), project: String::new() },
+        ];
+        let ids = store.insert_bulk(&items).unwrap();
+        assert_eq!(ids.len(), 3);
+
+        let pid = |id: i64| -> Option<i64> {
+            store
+                .conn
+                .query_row("SELECT project_id FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap()
+        };
+        // a and b share one project_id (same group+project); c is unfiled (NULL).
+        assert!(pid(ids[0]).is_some());
+        assert_eq!(pid(ids[0]), pid(ids[1]));
+        assert_eq!(pid(ids[2]), None);
+        // Exactly one group + one project created.
+        let groups: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM project_groups", [], |r| r.get(0))
+            .unwrap();
+        let projects: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((groups, projects), (1, 1));
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // A project-without-group row aborts the whole batch: nothing is written.
+    #[test]
+    fn insert_bulk_aborts_on_unmappable_row() {
+        let (mut store, path) = temp_store("bulk-abort");
+        let mk = |title: &str| Task {
+            id: None,
+            title: title.into(),
+            desc: String::new(),
+            deadline: None,
+            task_type: String::new(),
+            minutes: None,
+            recur: Recur::Once,
+            mode_override: None,
+            task_source: TriggerSource::Manual,
+            gcal_event_id: None,
+            estimate_minutes: None,
+            logged_minutes: 0,
+        };
+        let items = vec![
+            BulkInsert { task: mk("ok"), group: "Work".into(), project: "Alpha".into() },
+            BulkInsert { task: mk("bad"), group: String::new(), project: "Orphan".into() },
+        ];
+        assert!(store.insert_bulk(&items).is_err());
+        // Transaction rolled back — no tasks, and no partial group/project rows.
+        assert_eq!(store.list().unwrap().len(), 0);
+        let groups: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM project_groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(groups, 0);
         drop(store);
         let _ = std::fs::remove_file(&path);
     }

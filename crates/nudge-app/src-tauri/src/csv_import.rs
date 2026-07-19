@@ -376,6 +376,20 @@ impl ExistingKeys {
         self.titles.insert(title_key(title));
         self.deadlines.insert(deadline);
     }
+
+    /// Try to reserve a (title, deadline) pair using the §5 uniqueness rule:
+    /// unique iff **both** keys are unused. Returns `true` and reserves when
+    /// unique; returns `false` (reserving nothing) when either key already
+    /// exists. Backs the server-side re-dedup in `confirm_bulk_upload` (P4).
+    pub fn try_reserve(&mut self, title: &str, deadline: Option<i64>) -> bool {
+        let tkey = title_key(title);
+        if self.titles.contains(&tkey) || self.deadlines.contains(&deadline) {
+            return false;
+        }
+        self.titles.insert(tkey);
+        self.deadlines.insert(deadline);
+        true
+    }
 }
 
 /// One row dropped by dedup, paired with the human-readable matched reason.

@@ -2,8 +2,8 @@
 <!-- Boundary: forward-looking task queue only. Completed-step detail lives in HISTORY.md.
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below. -->
 
-Last completed: session 66 — Step 11c (Bulk Upload P3: `.xlsx` reader — `read_spreadsheet(bytes,ext)` seam in `csv_import.rs`; calamine first-worksheet→CSV→`parse_import`; 78 app-lib tests green).
-Next open: **step 11d** (Bulk Upload P4 — tauri commands, Sonnet, [PLAN-bulk-upload.md](PLAN-bulk-upload.md) §7 P4),
+Last completed: session 67 — Step 11d (Bulk Upload P4: `validate_bulk_upload`/`confirm_bulk_upload` tauri commands; connection-level `resolve_group_project` helper + `Store::insert_bulk` one-transaction resolve+insert with `project_id`; server-side re-validate + re-dedup; 80 app-lib tests green).
+Next open: **step 11e** (Bulk Upload P5 — `BulkUpload.svelte` + Tasks-page entry, Opus, [PLAN-bulk-upload.md](PLAN-bulk-upload.md) §7 P5),
 **step 9** (UI-PLAN §7 rework — planned, [UI-PLAN.md](UI-PLAN.md) §7).
 Step 6 (nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
 
@@ -22,7 +22,7 @@ Step 6 (nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
   - [x] **11a — schema + hierarchy resolver** | **Sonnet** | ~0.5d | PLAN §7 P1 — DONE (session 64): `project_groups`/`projects` tables in `db.rs` CREATE block, tolerant `ALTER TABLE tasks ADD COLUMN project_id`, `resolve_group_project(group,project)->Option<i64>` (exact NOCASE match-or-create, trimmed; blank-group & blank-project→None; project-without-group→Err). Tests `resolve_group_project_match_or_create` + `project_id_migration_is_tolerant`; 7 db:: tests green.
   - [x] **11b — parser + dedup** | **Sonnet** | ~0.5d | PLAN §7 P2 — DONE (session 65): `parse_import` extended to the 10-col header (`project_group`+`project`, `group` alias, project-without-group row error); pure `dedup_rows(rows,&mut ExistingKeys)->DedupOutcome{new_rows,ignored}` per §5 (new iff title NOCASE-trimmed AND deadline both unused; else ignored w/ matched reason; empty deadline collides only with empty; intra-sheet first-wins; invalid rows bypass, don't reserve keys). Tests: group/project capture+alias+error + 7 dedup cases; 76 app-lib tests green.
   - [x] **11c — `.xlsx` reader** | **Sonnet** | ~0.5d | PLAN §7 P3 — DONE (session 66): `read_spreadsheet(bytes,ext)` seam in `csv_import.rs` — `.csv` UTF-8 passthrough, `.xlsx`/`.xlsm` via `calamine` (first worksheet → quoted CSV via `csv::Writer` → `parse_import`), whole-float→int cell normalization (estimate `90.0`→`90`), unsupported-ext error. `calamine` dep + `rust_xlsxwriter` dev-dep; tests `read_spreadsheet_csv_passthrough_and_bad_ext` + `read_spreadsheet_xlsx_feeds_parse_import` (in-memory fixture round-trip); 78 app-lib tests green. CSV path untouched.
-  - [ ] **11d — tauri commands** | **Sonnet** | ~0.5d | PLAN §7 P4 — `validate_bulk_upload` + `confirm_bulk_upload` (one transaction: resolve hierarchy + `insert_batch` + single reload; server-side re-validate/re-dedup); `generate_handler!`.
+  - [x] **11d — tauri commands** | **Sonnet** | ~0.5d | PLAN §7 P4 — DONE (session 67): `validate_bulk_upload(bytes,ext)->{new_rows,ignored_rows}` (read_spreadsheet→parse_import→dedup_rows vs live `list()` snapshot) + `confirm_bulk_upload(rows)->usize` (per-row `form_to_task` re-validate + `ExistingKeys::try_reserve` re-dedup, then one transaction resolve+insert+single `signal_reload`); both in `generate_handler!`. `resolve_group_project` refactored to a connection-level free fn shared with new `Store::insert_bulk` (resolve hierarchy + insert w/ `project_id` in one tx, aborts on project-without-group). Tests `insert_bulk_resolves_hierarchy_and_project_id` + `insert_bulk_aborts_on_unmappable_row`; 80 app-lib tests green.
   - [ ] **11e — `BulkUpload.svelte` + Tasks-page entry** | **Opus** | ~1–1.5d | PLAN §7 P5 — rename Import→Bulk Upload under Tasks page; **both** tables editable (valid + ignored report block) with bidirectional rule-driven row movement (fix a dup's deadline → jumps to valid; reintroduce a collision → drops to report); Group/Project columns; Confirm; api.js wrappers + store batch helper. *(Opus: cross-cutting UI/state + in-table hierarchy editing + two-way row migration.)*
   - [ ] **11f — verify** | **Sonnet** | ~0.5d | PLAN §7 P6 — unit matrices green; live-drive a mixed `.xlsx` (two groups + title dup + deadline dup + blank-group row) end-to-end.
 
@@ -46,6 +46,7 @@ Step 6 (nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
 - [x] **11a** — Bulk Upload P1: `project_groups`/`projects` tables + tolerant `project_id` ALTER + `resolve_group_project` match-or-create in `db.rs` (session 64).
 - [x] **11b** — Bulk Upload P2: 10-col parser (`project_group`+`project`) + pure `dedup_rows` per PLAN §5; 76 app-lib tests green (session 65).
 - [x] **11c** — Bulk Upload P3: `.xlsx` reader — `read_spreadsheet(bytes,ext)` seam (calamine first-worksheet→CSV→`parse_import`); 78 app-lib tests green (session 66).
+- [x] **11d** — Bulk Upload P4: `validate_bulk_upload`/`confirm_bulk_upload` tauri commands + `Store::insert_bulk` one-tx resolve+insert w/ `project_id`; 80 app-lib tests green (session 67).
 
 ## Session model: Sonnet (default) | Opus gate on planning/complex design | Haiku for trivial tasks
 - Read NEXTSTEPS.md at start. Scan for incomplete steps:

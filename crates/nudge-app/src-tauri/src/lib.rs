@@ -190,6 +190,111 @@ fn import_tasks(rows: Vec<NewTaskForm>) -> Result<usize, String> {
     Ok(ids.len())
 }
 
+// --- Bulk Upload (PLAN-bulk-upload.md §7 P4) ---
+
+/// One row dropped by dedup, for the report block: the row DTO plus the matched
+/// reason (`title "X" already exists` / `deadline <ts> already exists`).
+#[derive(Serialize)]
+pub struct IgnoredRowDto {
+    pub row: csv_import::ImportRowDto,
+    pub reason: String,
+}
+
+/// Result of [`validate_bulk_upload`] (PLAN-bulk-upload.md §6.1): the new unique
+/// rows (valid table) and the ignored duplicates (report block). Both are fully
+/// editable client-side; the client re-calls validate as the user edits.
+#[derive(Serialize)]
+pub struct BulkValidationDto {
+    pub new_rows: Vec<csv_import::ImportRowDto>,
+    pub ignored_rows: Vec<IgnoredRowDto>,
+}
+
+/// Build the dedup key-set from a live snapshot of the current `tasks` (§5): the
+/// report is computed against the DB, never the client's stale view.
+fn existing_keys(store: &db::Store) -> Result<csv_import::ExistingKeys, String> {
+    let tasks = store.list().map_err(|e| format!("list tasks: {e}"))?;
+    let mut keys = csv_import::ExistingKeys::new();
+    for t in &tasks {
+        keys.insert(&t.title, t.deadline);
+    }
+    Ok(keys)
+}
+
+/// Parse uploaded bytes (`.csv`/`.xlsx`/`.xlsm`) into new-unique vs.
+/// ignored-duplicate rows (PLAN-bulk-upload.md §4/§5). Pure read: nothing is
+/// written. `ext` is the source file extension (`csv`, `xlsx`, …); CSV-paste
+/// callers pass the text encoded as UTF-8 bytes with `ext = "csv"`.
+#[tauri::command]
+fn validate_bulk_upload(bytes: Vec<u8>, ext: String) -> Result<BulkValidationDto, String> {
+    let text = csv_import::read_spreadsheet(&bytes, &ext)?;
+    let rows = csv_import::parse_import(&text);
+    let store = open()?;
+    let mut existing = existing_keys(&store)?;
+    let outcome = csv_import::dedup_rows(rows, &mut existing);
+    Ok(BulkValidationDto {
+        new_rows: outcome
+            .new_rows
+            .into_iter()
+            .map(csv_import::ImportRowDto::from)
+            .collect(),
+        ignored_rows: outcome
+            .ignored
+            .into_iter()
+            .map(|ig| IgnoredRowDto {
+                row: csv_import::ImportRowDto::from(ig.row),
+                reason: ig.reason,
+            })
+            .collect(),
+    })
+}
+
+/// One client-approved bulk-upload row: the task form plus its (unresolved)
+/// Project Group → Project names. Group/project resolve to a `project_id` inside
+/// the confirm transaction (exact NOCASE match-or-create).
+#[derive(Deserialize)]
+pub struct BulkRowInput {
+    pub form: NewTaskForm,
+    #[serde(default)]
+    pub project_group: String,
+    #[serde(default)]
+    pub project: String,
+}
+
+/// Confirm a bulk upload (PLAN-bulk-upload.md §6.4): re-validate every row
+/// server-side (`form_to_task`), re-dedup against a LIVE snapshot (client toggles
+/// are not trusted), then resolve the hierarchy and insert with `project_id` in
+/// ONE transaction, signalling the svc ONCE. Returns the number of tasks written.
+/// A row whose group/project is unmappable (project without a group) aborts.
+#[tauri::command]
+fn confirm_bulk_upload(rows: Vec<BulkRowInput>) -> Result<usize, String> {
+    if rows.is_empty() {
+        return Err("no rows to import".into());
+    }
+    let mut store = open()?;
+    let mut existing = existing_keys(&store)?;
+
+    let mut items: Vec<db::BulkInsert> = Vec::with_capacity(rows.len());
+    for (i, input) in rows.into_iter().enumerate() {
+        let group = input.project_group;
+        let project = input.project;
+        let task = form_to_task(input.form).map_err(|e| format!("row {}: {e}", i + 1))?;
+        // Re-dedup: skip any row that collides with the DB or an earlier accepted
+        // row in this batch (mirrors the §5 rule the report screen showed).
+        if !existing.try_reserve(&task.title, task.deadline) {
+            continue;
+        }
+        items.push(db::BulkInsert { task, group, project });
+    }
+    if items.is_empty() {
+        return Err("no unique rows to import".into());
+    }
+    let ids = store
+        .insert_bulk(&items)
+        .map_err(|e| format!("bulk insert: {e}"))?;
+    db::signal_reload();
+    Ok(ids.len())
+}
+
 /// Task id passed via `--task <id>` on a cold-start launch (9d-ii click-through).
 /// `Some` exactly once: the frontend takes it on first mount and it's consumed
 /// after that, so a later window refresh doesn't re-open the same task.
@@ -801,6 +906,8 @@ pub fn run() {
             add_task,
             validate_csv_import,
             import_tasks,
+            validate_bulk_upload,
+            confirm_bulk_upload,
             delete_task,
             get_pending_task,
             google::google_status,
