@@ -136,6 +136,29 @@ pub fn update_event(
     parse_event(&json).ok_or_else(|| "events.update: malformed response".to_string())
 }
 
+/// `DELETE /calendars/{id}/events/{eventId}` — remove an event from Google.
+/// Returns `204 No Content` on success (no body to parse). A `410 Gone` means
+/// the event was already deleted upstream, which we treat as success so a stale
+/// local row can still be reconciled away. Same primary-only restriction as
+/// [`create_event`].
+pub fn delete_event(access_token: &str, calendar_id: &str, event_id: &str) -> Result<(), String> {
+    let url = format!(
+        "https://www.googleapis.com/calendar/v3/calendars/{}/events/{}",
+        path_encode(calendar_id),
+        path_encode(event_id)
+    );
+    match agent()
+        .delete(&url)
+        .set("Authorization", &format!("Bearer {access_token}"))
+        .call()
+    {
+        Ok(_) => Ok(()),
+        // Already gone upstream — idempotent delete, not an error.
+        Err(ureq::Error::Status(410, _)) => Ok(()),
+        Err(e) => Err(format!("events.delete request failed ({event_id}): {e}")),
+    }
+}
+
 // --- pure helpers (unit-tested) ---
 
 /// Build the `events.insert`/`events.update` request body. All-day events use

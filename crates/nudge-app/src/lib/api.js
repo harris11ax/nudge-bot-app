@@ -84,6 +84,13 @@ export const createEvent = (form) => invoke("create_event", { form });
 /** Update an existing event's summary/time on the primary calendar. */
 export const updateEvent = (eventId, form) => invoke("update_event", { eventId, form });
 
+/**
+ * Delete an event from the primary calendar (§7.2 event-click menu). Pushes the
+ * delete to Google, drops the cached row, and unbinds any task that referenced
+ * it. @returns {Promise<number>} count of tasks unbound.
+ */
+export const deleteEvent = (eventId) => invoke("delete_event", { eventId });
+
 /** @returns {Promise<Array>} pending suggested triggers (connector inbox, 10d), newest first. */
 export const listSuggestedTriggers = () => invoke("list_suggested_triggers");
 

@@ -6,7 +6,7 @@
   // no-op. A failed refresh (offline, not connected) never blocks rendering —
   // cached events still show, just flagged with the offline banner.
   import { onMount } from "svelte";
-  import { store } from "./store.svelte.js";
+  import { store, refresh as refreshTasks } from "./store.svelte.js";
   import {
     listCalendars,
     refreshCalendars,
@@ -14,6 +14,7 @@
     googleLastRefresh,
     createEvent,
     updateEvent,
+    deleteEvent,
   } from "./api.js";
 
   const DAY_MS = 24 * 3600 * 1000;
@@ -264,6 +265,25 @@
       dialogSaving = false;
     }
   }
+
+  // §7.2 event-click menu — Delete Event. Pushes the delete to Google, drops the
+  // cached row, and unbinds any task that referenced it; refreshes the grid and
+  // the task store (a bound task's Calendar-event field flips to "—").
+  async function deleteDialogEvent() {
+    if (!dialog || dialog.mode !== "edit") return;
+    dialogSaving = true;
+    dialogErr = "";
+    try {
+      await deleteEvent(dialog.eventId);
+      dialog = null;
+      await loadEvents();
+      await refreshTasks();
+    } catch (err) {
+      dialogErr = String(err);
+    } finally {
+      dialogSaving = false;
+    }
+  }
 </script>
 
 <header class="head">
@@ -370,6 +390,11 @@
         {/if}
         {#if dialogErr}<p class="error wide">{dialogErr}</p>{/if}
         <div class="wide dialog-actions">
+          {#if dialog.mode === "edit"}
+            <button type="button" class="danger" onclick={deleteDialogEvent} disabled={dialogSaving}>
+              Delete
+            </button>
+          {/if}
           <button type="button" onclick={closeDialog}>Cancel</button>
           <button class="primary" type="submit" disabled={dialogSaving}>
             {dialogSaving ? "Saving…" : dialog.mode === "create" ? "Create" : "Save"}

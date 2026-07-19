@@ -458,6 +458,15 @@ impl Store {
         )
     }
 
+    /// Clear the binding on every task pointing at `event_id` (§7.2 event
+    /// delete). Returns the number of tasks unbound so the caller can log/report.
+    pub fn clear_tasks_bound_to_event(&self, event_id: &str) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE tasks SET gcal_event_id = NULL WHERE gcal_event_id = ?1",
+            rusqlite::params![event_id],
+        )
+    }
+
     /// All calendars, alphabetical by summary. Persisted `selected`/`is_primary`
     /// state lives here even when offline (Calendar tab's grey-out reads this).
     pub fn list_calendars(&self) -> rusqlite::Result<Vec<CalendarRow>> {
@@ -973,6 +982,54 @@ mod tests {
         // Replace is wholesale.
         store.set_task_tools(id, &[("code.exe".into(), "tool".into())]).unwrap();
         assert_eq!(store.list_task_tools(id).unwrap().len(), 1);
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // §7.2 event delete: deleting an event unbinds every task pointing at it
+    // (and only those), leaving other tasks untouched.
+    fn task_bound_to(event_id: Option<&str>) -> Task {
+        Task {
+            id: None,
+            title: "ship".into(),
+            desc: String::new(),
+            deadline: Some(1_784_000_000),
+            task_type: String::new(),
+            minutes: None,
+            recur: Recur::Once,
+            mode_override: None,
+            task_source: TriggerSource::Manual,
+            gcal_event_id: event_id.map(str::to_string),
+            estimate_minutes: None,
+            logged_minutes: 0,
+        }
+    }
+
+    #[test]
+    fn clear_tasks_bound_to_event_unbinds_matching_only() {
+        let (store, path) = temp_store("clearbind");
+        let a = store.insert(&task_bound_to(Some("evt-1"))).unwrap();
+        let b = store.insert(&task_bound_to(Some("evt-1"))).unwrap();
+        let c = store.insert(&task_bound_to(Some("evt-2"))).unwrap();
+
+        assert_eq!(store.clear_tasks_bound_to_event("evt-1").unwrap(), 2);
+
+        let by_id = |id: i64| {
+            store
+                .list()
+                .unwrap()
+                .into_iter()
+                .find(|t| t.id == Some(id))
+                .unwrap()
+                .gcal_event_id
+        };
+        assert_eq!(by_id(a), None);
+        assert_eq!(by_id(b), None);
+        assert_eq!(by_id(c).as_deref(), Some("evt-2"));
+
+        // Unknown event unbinds nothing.
+        assert_eq!(store.clear_tasks_bound_to_event("nope").unwrap(), 0);
 
         drop(store);
         let _ = std::fs::remove_file(&path);

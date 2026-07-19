@@ -857,6 +857,32 @@ fn update_event(event_id: String, form: EventForm) -> Result<EventDto, String> {
     }
 }
 
+/// Delete an event from the primary calendar (§7.2 event-click menu). Pushes
+/// the delete to Google first — an optimistic local drop before a failed push
+/// would silently lose an event that still exists upstream — then drops the
+/// cached row and unbinds any task that referenced it. A `410 Gone` from Google
+/// is treated as success (already deleted upstream). Returns the number of
+/// tasks that were unbound.
+#[tauri::command]
+fn delete_event(event_id: String) -> Result<usize, String> {
+    let store = open()?;
+    let calendar_id = require_primary_calendar(&store)?;
+
+    let token = google::access_token()?;
+    google::calendar::delete_event(&token, &calendar_id, &event_id)?;
+
+    store
+        .delete_event(&event_id)
+        .map_err(|e| format!("drop cached event: {e}"))?;
+    let unbound = store
+        .clear_tasks_bound_to_event(&event_id)
+        .map_err(|e| format!("unbind tasks: {e}"))?;
+    if unbound > 0 {
+        db::signal_reload();
+    }
+    Ok(unbound)
+}
+
 // --- Task tools + app classification (§6.2, PLAN-step3 P3) ---
 
 /// Wire shape of a selector/Settings app row (`app_usage` ⟕ `app_classes`).
@@ -1073,6 +1099,7 @@ pub fn run() {
             set_primary_calendar,
             create_event,
             update_event,
+            delete_event,
             list_suggested_triggers,
             accept_suggested_trigger,
             dismiss_suggested_trigger,
