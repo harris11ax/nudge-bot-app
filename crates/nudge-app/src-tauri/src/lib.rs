@@ -10,6 +10,7 @@ mod db;
 mod google;
 #[cfg(windows)]
 mod ipc;
+mod launch;
 
 use db::{CalendarRow, EventRow, Store, SuggestedTriggerRow};
 use google::calendar::EventInfo;
@@ -918,11 +919,15 @@ impl From<db::AppRow> for AppDto {
     }
 }
 
-/// One `(app_name, kind)` tool row; `kind ∈ tool | ignore`.
+/// One `(app_name, kind)` tool row; `kind ∈ tool | ignore`. `url` is the
+/// optional bound launch URL for web tools (§7.4c); `#[serde(default)]` keeps
+/// older callers that send only `{app_name, kind}` valid (url → `None`).
 #[derive(Serialize, Deserialize)]
 pub struct ToolDto {
     pub app_name: String,
     pub kind: String,
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// Every app the Tools selector can offer, usage-sorted descending. The
@@ -941,7 +946,8 @@ fn list_apps_for_selector() -> Result<Vec<AppDto>, String> {
 #[tauri::command]
 fn set_task_tools_cmd(task_id: i64, tools: Vec<ToolDto>) -> Result<(), String> {
     let mut store = open()?;
-    let pairs: Vec<(String, String)> = tools.into_iter().map(|t| (t.app_name, t.kind)).collect();
+    let pairs: Vec<(String, String, Option<String>)> =
+        tools.into_iter().map(|t| (t.app_name, t.kind, t.url)).collect();
     store
         .set_task_tools(task_id, &pairs)
         .map_err(|e| format!("set task tools: {e}"))?;
@@ -958,8 +964,52 @@ fn list_task_tools_cmd(task_id: i64) -> Result<Vec<ToolDto>, String> {
         .map_err(|e| format!("list task tools: {e}"))?;
     Ok(rows
         .into_iter()
-        .map(|(app_name, kind)| ToolDto { app_name, kind })
+        .map(|(app_name, kind, url)| ToolDto { app_name, kind, url })
         .collect())
+}
+
+/// Launch one attached tool from the task page (§7.4c): resolve its
+/// `(app_name, bound url)` to a website or exe and open it. Best-effort — a
+/// failing ShellExecute returns its error to the UI (surfaced as a small note)
+/// but is never fatal. Exe launches skip an already-running process.
+#[tauri::command]
+fn launch_tool(task_id: i64, app_name: String) -> Result<(), String> {
+    let store = open()?;
+    let url = store
+        .task_tool_url(task_id, &app_name)
+        .map_err(|e| format!("lookup tool url: {e}"))?;
+    let target = launch::resolve_target(&app_name, url.as_deref());
+    launch::launch(&target, &launch::running_exes())
+}
+
+/// "Launch all" for a task's tool set (§7.4c): open every `kind = "tool"` row
+/// (ignore-kind rows are skipped). Websites always open; exes skip if running.
+/// Returns the count launched; per-tool failures are collected and reported so
+/// one bad row can't abort the rest.
+#[tauri::command]
+fn launch_task_tools(task_id: i64) -> Result<usize, String> {
+    let store = open()?;
+    let rows = store
+        .list_task_tools(task_id)
+        .map_err(|e| format!("list task tools: {e}"))?;
+    let running = launch::running_exes();
+    let mut launched = 0usize;
+    let mut errs: Vec<String> = Vec::new();
+    for (app_name, kind, url) in rows {
+        if kind != "tool" {
+            continue;
+        }
+        let target = launch::resolve_target(&app_name, url.as_deref());
+        match launch::launch(&target, &running) {
+            Ok(()) => launched += 1,
+            Err(e) => errs.push(e),
+        }
+    }
+    if errs.is_empty() {
+        Ok(launched)
+    } else {
+        Err(errs.join("; "))
+    }
 }
 
 /// Set an app's global class (§6.2 favorite|normal|hidden|not_tool).
@@ -1150,6 +1200,8 @@ pub fn run() {
             list_apps_for_selector,
             set_task_tools_cmd,
             list_task_tools_cmd,
+            launch_tool,
+            launch_task_tools,
             set_app_class_cmd,
             list_app_classes,
             list_not_tool_candidates,

@@ -1,6 +1,7 @@
 <script>
   import { removeTask, saveTask } from "./store.svelte.js";
   import { hhmm, recurLabel, deadlineLabel, countdown } from "./format.js";
+  import { listTaskTools, setTaskTools, launchTool, launchTaskTools } from "./api.js";
 
   // Task detail page (UI-PLAN §2 Planner). §7.2: an inline edit form wired to
   // `update_task` (rewrites the user-editable fields, best-effort propagates
@@ -13,6 +14,53 @@
   let form = $state(/** @type {any} */ (null));
   let saveErr = $state("");
   let saving = $state(false);
+
+  // §7.4c launch-from-task: a task's attached tools, each launchable on demand
+  // (websites open the bound URL / derived host, exes ShellExecute unless
+  // running). The URL field is editable per web tool and persists via setTaskTools.
+  let tools = $state(/** @type {Array<{app_name:string,kind:string,url:?string}>} */ ([]));
+  let toolMsg = $state("");
+
+  // A per-site tool name (§7.4b `<exe> → <host>`) is a website; anything else is
+  // an exe. Websites get the editable URL field; exes just launch.
+  const isWeb = (t) => t.app_name.includes(" → ");
+  const launchTools = $derived(tools.filter((t) => t.kind === "tool"));
+
+  async function loadTools() {
+    try {
+      tools = await listTaskTools(task.id);
+    } catch (e) {
+      toolMsg = String(e);
+    }
+  }
+  $effect(() => {
+    task.id; // re-load when the viewed task changes
+    loadTools();
+  });
+
+  async function saveToolUrls() {
+    // Round-trip the whole list so edited URLs persist (server stores blank → NULL).
+    await setTaskTools(task.id, $state.snapshot(tools));
+  }
+
+  async function doLaunch(appName) {
+    toolMsg = "";
+    try {
+      await launchTool(task.id, appName);
+    } catch (e) {
+      toolMsg = String(e);
+    }
+  }
+
+  async function doLaunchAll() {
+    toolMsg = "";
+    try {
+      const n = await launchTaskTools(task.id);
+      toolMsg = `Launched ${n} tool${n === 1 ? "" : "s"}.`;
+    } catch (e) {
+      toolMsg = String(e);
+    }
+  }
 
   async function del() {
     await removeTask(task.id);
@@ -138,3 +186,30 @@
     <p class="hint">History (sessions.db edges + outcomes) lands with the Log tab.</p>
   {/if}
 </div>
+
+{#if !editing && launchTools.length}
+  <div class="card tools">
+    <div class="tools-head">
+      <h2>Tools</h2>
+      <button class="primary" onclick={doLaunchAll}>Launch all</button>
+    </div>
+    <ul class="tool-list">
+      {#each launchTools as t (t.app_name)}
+        <li>
+          <span class="tool-name" class:web={isWeb(t)}>{t.app_name}</span>
+          {#if isWeb(t)}
+            <input
+              class="tool-url"
+              type="url"
+              placeholder="https://… (optional exact URL)"
+              bind:value={t.url}
+              onblur={saveToolUrls}
+            />
+          {/if}
+          <button class="ghost" onclick={() => doLaunch(t.app_name)}>Launch</button>
+        </li>
+      {/each}
+    </ul>
+    {#if toolMsg}<p class="hint">{toolMsg}</p>{/if}
+  </div>
+{/if}

@@ -228,6 +228,11 @@ impl Store {
             // Tolerant ADD — duplicate-column error on an already-migrated DB is
             // ignored, same idiom as the columns above. Unfiled tasks stay NULL.
             "ALTER TABLE tasks ADD COLUMN project_id INTEGER",
+            // §7.4(c) launch-from-task: optional bound URL for web tools. The svc
+            // still reads only `(app_name, kind)`, so its byte-identical CREATE is
+            // untouched; this app-owned column is added by tolerant ALTER (dup on
+            // an already-migrated DB is ignored, same idiom as above).
+            "ALTER TABLE task_tools ADD COLUMN url TEXT",
         ] {
             let _ = conn.execute(col, []);
         }
@@ -777,25 +782,44 @@ impl Store {
     /// re-inserts `(app_name, kind)` pairs, deduping via the composite PK. A
     /// transaction so a partial write can't leave a half-updated list the svc
     /// might read mid-edit.
-    pub fn set_task_tools(&mut self, task_id: i64, tools: &[(String, String)]) -> rusqlite::Result<()> {
+    pub fn set_task_tools(&mut self, task_id: i64, tools: &[(String, String, Option<String>)]) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM task_tools WHERE task_id = ?1", rusqlite::params![task_id])?;
-        for (app_name, kind) in tools {
+        for (app_name, kind, url) in tools {
+            // Store an empty/whitespace URL as NULL so "no bound URL" reads back
+            // uniformly (`None`), never as `Some("")`.
+            let url = url.as_deref().map(str::trim).filter(|u| !u.is_empty());
             tx.execute(
-                "INSERT OR IGNORE INTO task_tools (task_id, app_name, kind) VALUES (?1, ?2, ?3)",
-                rusqlite::params![task_id, app_name, kind],
+                "INSERT OR IGNORE INTO task_tools (task_id, app_name, kind, url) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![task_id, app_name, kind, url],
             )?;
         }
         tx.commit()
     }
 
-    /// A task's `(app_name, kind)` tool rows, ordered for a stable UI/compare.
-    pub fn list_task_tools(&self, task_id: i64) -> rusqlite::Result<Vec<(String, String)>> {
+    /// A task's `(app_name, kind, url)` tool rows, ordered for a stable UI/compare.
+    pub fn list_task_tools(&self, task_id: i64) -> rusqlite::Result<Vec<(String, String, Option<String>)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT app_name, kind FROM task_tools WHERE task_id = ?1 ORDER BY app_name, kind",
+            "SELECT app_name, kind, url FROM task_tools WHERE task_id = ?1 ORDER BY app_name, kind",
         )?;
-        let rows = stmt.query_map(rusqlite::params![task_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let rows = stmt.query_map(rusqlite::params![task_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         rows.collect()
+    }
+
+    /// The bound URL (if any) for one `(task_id, app_name)` tool row — the
+    /// launch-from-task lookup (§7.4c). `None` when the row is missing or has no
+    /// URL; the caller then falls back to per-site host / exe launch.
+    pub fn task_tool_url(&self, task_id: i64, app_name: &str) -> rusqlite::Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT url FROM task_tools WHERE task_id = ?1 AND app_name = ?2",
+                rusqlite::params![task_id, app_name],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
     }
 
     /// Set an app's global class (§6.2 favorite|normal|hidden|not_tool), upserting.
@@ -977,14 +1001,28 @@ mod tests {
         assert_eq!(got.logged_minutes, 0); // insert never writes logged
 
         store
-            .set_task_tools(id, &[("code.exe".into(), "tool".into()), ("slack.exe".into(), "ignore".into())])
+            .set_task_tools(id, &[
+                ("code.exe".into(), "tool".into(), None),
+                ("brave.exe → github.com".into(), "tool".into(), Some("https://github.com/me/repo".into())),
+                ("slack.exe".into(), "ignore".into(), None),
+            ])
             .unwrap();
         assert_eq!(
             store.list_task_tools(id).unwrap(),
-            vec![("code.exe".into(), "tool".into()), ("slack.exe".into(), "ignore".into())]
+            vec![
+                ("brave.exe → github.com".into(), "tool".into(), Some("https://github.com/me/repo".into())),
+                ("code.exe".into(), "tool".into(), None),
+                ("slack.exe".into(), "ignore".into(), None),
+            ]
         );
+        // §7.4c: the bound URL is retrievable per (task, app); blank → NULL.
+        assert_eq!(
+            store.task_tool_url(id, "brave.exe → github.com").unwrap().as_deref(),
+            Some("https://github.com/me/repo")
+        );
+        assert_eq!(store.task_tool_url(id, "code.exe").unwrap(), None);
         // Replace is wholesale.
-        store.set_task_tools(id, &[("code.exe".into(), "tool".into())]).unwrap();
+        store.set_task_tools(id, &[("code.exe".into(), "tool".into(), None)]).unwrap();
         assert_eq!(store.list_task_tools(id).unwrap().len(), 1);
 
         drop(store);
@@ -1203,7 +1241,7 @@ mod tests {
             logged_minutes: 0,
         };
         let id = store.insert(&t).unwrap();
-        store.set_task_tools(id, &[("chrome.exe".into(), "tool".into()), ("slack.exe".into(), "ignore".into())]).unwrap();
+        store.set_task_tools(id, &[("chrome.exe".into(), "tool".into(), None), ("slack.exe".into(), "ignore".into(), None)]).unwrap();
         let cands = store.list_not_tool_candidates(10).unwrap();
         let cand_names: Vec<&str> = cands.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(cand_names, vec!["game.exe"]);

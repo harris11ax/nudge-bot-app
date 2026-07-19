@@ -194,6 +194,15 @@ code { background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
 .detail .desc { margin-top: 0; }
 .detail-actions { display: flex; gap: 8px; }
 
+/* ---- task tools (§7.4c launch-from-task) ---- */
+.tools .tools-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.tools .tools-head h2 { margin: 0; font-size: 15px; }
+.tool-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.tool-list li { display: flex; align-items: center; gap: 8px; }
+.tool-name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tool-name.web { color: var(--accent, #4a9eff); }
+.tool-url { flex: 1; min-width: 0; }
+
 /* ---- calendar tab ---- */
 .cal-nav { display: flex; align-items: center; gap: 10px; }
 .cal-nav button { padding: 4px 10px; }

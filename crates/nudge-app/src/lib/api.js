@@ -127,11 +127,17 @@ export const runConnectors = () => invoke("run_connectors");
 /** @returns {Promise<Array<{name:string, minutes_90d:number, class:string}>>} every selectable app, usage-sorted desc. */
 export const listAppsForSelector = () => invoke("list_apps_for_selector");
 
-/** Replace a task's tool list wholesale. `tools` = [{app_name, kind}] with kind ∈ tool|ignore. */
+/** Replace a task's tool list wholesale. `tools` = [{app_name, kind, url?}] with kind ∈ tool|ignore. */
 export const setTaskTools = (taskId, tools) => invoke("set_task_tools_cmd", { taskId, tools });
 
-/** @returns {Promise<Array<{app_name:string, kind:string}>>} a task's tool rows. */
+/** @returns {Promise<Array<{app_name:string, kind:string, url:?string}>>} a task's tool rows. */
 export const listTaskTools = (taskId) => invoke("list_task_tools_cmd", { taskId });
+
+/** §7.4c: launch one attached tool (website URL or Windows exe) from the task page. */
+export const launchTool = (taskId, appName) => invoke("launch_tool", { taskId, appName });
+
+/** §7.4c: launch every `tool`-kind row for a task. @returns {Promise<number>} count launched. */
+export const launchTaskTools = (taskId) => invoke("launch_task_tools", { taskId });
 
 /** Set an app's global class: favorite|normal|hidden|not_tool. */
 export const setAppClass = (appName, cls) => invoke("set_app_class_cmd", { appName, class: cls });
