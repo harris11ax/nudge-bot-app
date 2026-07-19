@@ -390,6 +390,19 @@ impl Store {
             .execute("DELETE FROM tasks WHERE id = ?1", rusqlite::params![id])
     }
 
+    /// Bind (or clear) a task's Calendar Event id (§7.2 auto-tie). Returns the
+    /// number of rows touched (0 if the task id is unknown).
+    pub fn set_task_gcal_event_id(
+        &self,
+        id: i64,
+        gcal_event_id: Option<&str>,
+    ) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE tasks SET gcal_event_id = ?1 WHERE id = ?2",
+            rusqlite::params![gcal_event_id, id],
+        )
+    }
+
     /// All calendars, alphabetical by summary. Persisted `selected`/`is_primary`
     /// state lives here even when offline (Calendar tab's grey-out reads this).
     pub fn list_calendars(&self) -> rusqlite::Result<Vec<CalendarRow>> {
@@ -905,6 +918,44 @@ mod tests {
         // Replace is wholesale.
         store.set_task_tools(id, &[("code.exe".into(), "tool".into())]).unwrap();
         assert_eq!(store.list_task_tools(id).unwrap().len(), 1);
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // §7.2 auto-tie: a task's Calendar Event id can be bound after insert and
+    // cleared again; an unknown id is a no-op.
+    #[test]
+    fn set_task_gcal_event_id_binds_and_clears() {
+        let (store, path) = temp_store("gcaltie");
+        let t = Task {
+            id: None,
+            title: "ship".into(),
+            desc: String::new(),
+            deadline: Some(1_784_000_000),
+            task_type: String::new(),
+            minutes: None,
+            recur: Recur::Once,
+            mode_override: None,
+            task_source: TriggerSource::Manual,
+            gcal_event_id: None,
+            estimate_minutes: None,
+            logged_minutes: 0,
+        };
+        let id = store.insert(&t).unwrap();
+        assert_eq!(store.list().unwrap()[0].gcal_event_id, None);
+
+        assert_eq!(store.set_task_gcal_event_id(id, Some("evt-42")).unwrap(), 1);
+        assert_eq!(
+            store.list().unwrap()[0].gcal_event_id.as_deref(),
+            Some("evt-42")
+        );
+
+        assert_eq!(store.set_task_gcal_event_id(id, None).unwrap(), 1);
+        assert_eq!(store.list().unwrap()[0].gcal_event_id, None);
+
+        // Unknown id touches nothing.
+        assert_eq!(store.set_task_gcal_event_id(99999, Some("x")).unwrap(), 0);
 
         drop(store);
         let _ = std::fs::remove_file(&path);

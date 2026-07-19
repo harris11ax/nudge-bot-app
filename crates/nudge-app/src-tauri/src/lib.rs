@@ -316,10 +316,74 @@ fn delete_task(id: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// Default bound-event duration when none is configured (§7.2: Deadline → Deadline + 1 h).
+const DEFAULT_EVENT_SECS: i64 = 3600;
+
+/// Bound-event bounds for a task Deadline (§7.2): event start = Deadline, event
+/// end = Deadline + `duration_secs`. Pure so the +1 h default is unit-testable.
+fn default_event_bounds(deadline: i64, duration_secs: i64) -> (i64, i64) {
+    (deadline, deadline + duration_secs)
+}
+
+/// §7.2 auto-tie on create: create a bound Calendar Event for a freshly-inserted
+/// task and persist the binding. Best-effort and non-fatal — a task with no
+/// Deadline, no primary calendar chosen, or an offline/auth failure simply stays
+/// unbound (GOOGLE-PLAN.md constraint #4: offline degrades, never breaks). Returns
+/// the bound event id on success, `None` otherwise.
+fn try_autotie(store: &Store, task_id: i64, title: &str, deadline: Option<i64>) -> Option<String> {
+    // Only tie tasks that carry a hard Deadline — there is no anchor otherwise.
+    let deadline = deadline?;
+    // No write target picked yet ⇒ nothing to tie to (not an error).
+    let calendar_id = store.primary_calendar_id().ok().flatten()?;
+
+    let duration = store
+        .get_meta("default_event_secs")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|d| *d > 0)
+        .unwrap_or(DEFAULT_EVENT_SECS);
+    let (start_unix, end_unix) = default_event_bounds(deadline, duration);
+
+    let token = match google::access_token() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("auto-tie skipped (no Google token): {e}");
+            return None;
+        }
+    };
+    let event = match google::calendar::create_event(
+        &token,
+        &calendar_id,
+        title,
+        start_unix,
+        end_unix,
+        false,
+    ) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("auto-tie skipped (event create failed): {e}");
+            return None;
+        }
+    };
+    // Cache the event locally so the Calendar tab shows it before the next
+    // refresh, then persist the binding. A cache miss is non-fatal.
+    let _ = store.upsert_event(&calendar_id, &event);
+    if let Err(e) = store.set_task_gcal_event_id(task_id, Some(&event.event_id)) {
+        eprintln!("auto-tie: event created but binding not saved: {e}");
+        return None;
+    }
+    Some(event.event_id)
+}
+
 fn insert_and_reload(mut task: Task) -> Result<TaskDto, String> {
     let store = open()?;
     let id = store.insert(&task).map_err(|e| format!("insert: {e}"))?;
     task.id = Some(id);
+    // §7.2: bind a Calendar Event on create (best-effort; never blocks the task).
+    if task.gcal_event_id.is_none() {
+        task.gcal_event_id = try_autotie(&store, id, &task.title, task.deadline);
+    }
     db::signal_reload();
     Ok(TaskDto::from(task))
 }
@@ -944,6 +1008,14 @@ pub fn run() {
 #[cfg(test)]
 mod import_e2e_tests {
     use super::*;
+
+    // §7.2: the bound event runs Deadline → Deadline + duration (default 1 h).
+    #[test]
+    fn default_event_bounds_is_deadline_plus_duration() {
+        assert_eq!(default_event_bounds(1_784_000_000, 3600), (1_784_000_000, 1_784_003_600));
+        // A custom duration is honoured verbatim.
+        assert_eq!(default_event_bounds(100, 1800), (100, 1900));
+    }
 
     // End-to-end CSV import: a mixed valid/broken blob parses to per-row verdicts,
     // only the valid rows are converted server-side (form_to_task) and land via

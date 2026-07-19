@@ -496,3 +496,23 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
   (still pre-§7.1 `trigger_source`, no `project_id`). The Svelte↔Tauri wiring (arraybuffer→invoke,
   two-table render, §5 bidirectional row movement) is deferred to a human-present session → NEXTSTEPS
   step 1. Nothing committed.
+
+## Session 70 (2026-07-19) — Step 2 / UI-PLAN §7.2 phase 1: Task↔Event auto-tie on create (backend)
+- Started §7.2 (bidirectional Task↔Event binding). First coherent, offline-verifiable phase:
+  **auto-tie on create** — creating a Task now creates a bound Calendar Event and persists the binding.
+- `db.rs`: `Store::set_task_gcal_event_id(id, Option<&str>) -> usize` (UPDATE tasks SET gcal_event_id;
+  0 rows on unknown id). Test `set_task_gcal_event_id_binds_and_clears` (bind → clear → unknown no-op).
+- `lib.rs`: pure `default_event_bounds(deadline, duration_secs) -> (start, end)` (§7.2 default Deadline →
+  Deadline + 1 h; test `default_event_bounds_is_deadline_plus_duration`). `try_autotie(store, id, title,
+  deadline)` — best-effort, non-fatal: returns `None` (task stays unbound) when the task has no Deadline,
+  no primary calendar is chosen, or Google token/`create_event` fails (GOOGLE-PLAN #4 offline-degrades).
+  On success: `create_event` on the primary calendar (start=Deadline, end=Deadline+duration; duration
+  from meta `default_event_secs`, else 3600), caches the event locally (`upsert_event`), binds via
+  `set_task_gcal_event_id`. Wired into `insert_and_reload` (covers both `add_task` and `add_quickadd`);
+  DTO now returns the bound `gcal_event_id`. **Suggested-exclusion (§7.2) already satisfied** —
+  `connectors.rs` excludes `known_gcal_event_ids()`, so a now-bound task drops out of Suggested for free.
+- **83 app-lib tests green** (81 prior + 2). No commit.
+- **Deferred to later §7.2 phases:** the live network drive of auto-tie (needs OAuth + a chosen primary
+  calendar — not available in a scheduled run); **edit propagation** (blocked on there being no
+  `update_task` command yet — tasks are create/delete-only in the app today); event-click Add/Edit/Delete
+  menu (§7.2, calendar UI); Svelte surfacing of the binding.
