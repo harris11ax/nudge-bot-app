@@ -2,8 +2,8 @@
 <!-- Boundary: forward-looking task queue only. Completed-step detail lives in HISTORY.md.
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below. -->
 
-Last completed: session 64 — Step 11a (Bulk Upload P1: schema + hierarchy resolver — `project_groups`/`projects` tables + tolerant `project_id` ALTER + `resolve_group_project` match-or-create in `db.rs`; 7 db:: tests green).
-Next open: **step 11b** (Bulk Upload P2 — parser + dedup, Sonnet, [PLAN-bulk-upload.md](PLAN-bulk-upload.md) §7 P2),
+Last completed: session 65 — Step 11b (Bulk Upload P2: parser + dedup — 10-col header w/ `project_group`+`project` in `csv_import.rs`, pure `dedup_rows(rows,&mut ExistingKeys)->DedupOutcome`; 76 app-lib tests green).
+Next open: **step 11c** (Bulk Upload P3 — `.xlsx` reader, Sonnet, [PLAN-bulk-upload.md](PLAN-bulk-upload.md) §7 P3),
 **step 9** (UI-PLAN §7 rework — planned, [UI-PLAN.md](UI-PLAN.md) §7).
 Step 6 (nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
 
@@ -20,7 +20,7 @@ Step 6 (nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
   unused; if **either** matches an existing task it's reported ignored. App-process only — no svc change,
   no polling, no in-app LLM/network. Phases (one per session, each references the plan):
   - [x] **11a — schema + hierarchy resolver** | **Sonnet** | ~0.5d | PLAN §7 P1 — DONE (session 64): `project_groups`/`projects` tables in `db.rs` CREATE block, tolerant `ALTER TABLE tasks ADD COLUMN project_id`, `resolve_group_project(group,project)->Option<i64>` (exact NOCASE match-or-create, trimmed; blank-group & blank-project→None; project-without-group→Err). Tests `resolve_group_project_match_or_create` + `project_id_migration_is_tolerant`; 7 db:: tests green.
-  - [ ] **11b — parser + dedup** | **Sonnet** | ~0.5d | PLAN §7 P2 — extend `parse_import` to the 10-col header; pure `dedup_rows` over an injected existing-set; unit matrix (title/deadline/both-empty/intra-sheet/blank-group).
+  - [x] **11b — parser + dedup** | **Sonnet** | ~0.5d | PLAN §7 P2 — DONE (session 65): `parse_import` extended to the 10-col header (`project_group`+`project`, `group` alias, project-without-group row error); pure `dedup_rows(rows,&mut ExistingKeys)->DedupOutcome{new_rows,ignored}` per §5 (new iff title NOCASE-trimmed AND deadline both unused; else ignored w/ matched reason; empty deadline collides only with empty; intra-sheet first-wins; invalid rows bypass, don't reserve keys). Tests: group/project capture+alias+error + 7 dedup cases; 76 app-lib tests green.
   - [ ] **11c — `.xlsx` reader** | **Sonnet** | ~0.5d | PLAN §7 P3 — `calamine` behind `read_spreadsheet(bytes,ext)` feeding `parse_import`; fixture `.xlsx` test; CSV path untouched.
   - [ ] **11d — tauri commands** | **Sonnet** | ~0.5d | PLAN §7 P4 — `validate_bulk_upload` + `confirm_bulk_upload` (one transaction: resolve hierarchy + `insert_batch` + single reload; server-side re-validate/re-dedup); `generate_handler!`.
   - [ ] **11e — `BulkUpload.svelte` + Tasks-page entry** | **Opus** | ~1–1.5d | PLAN §7 P5 — rename Import→Bulk Upload under Tasks page; **both** tables editable (valid + ignored report block) with bidirectional rule-driven row movement (fix a dup's deadline → jumps to valid; reintroduce a collision → drops to report); Group/Project columns; Confirm; api.js wrappers + store batch helper. *(Opus: cross-cutting UI/state + in-table hierarchy editing + two-way row migration.)*
@@ -44,6 +44,7 @@ Step 6 (nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
 - [x] **8** — Gmail scan 403 → actionable reconnect message (`request_err` in `google/gmail.rs`; scope + reconnect path already correct) (session 63).
 - [x] **7** — CSV bulk task import: P1 parser (58) · P2 `insert_batch`+cmds (59) · P3 `CsvImport.svelte` filter screen (61) · P4 batch/e2e tests, 61 app-lib tests green (session 62).
 - [x] **11a** — Bulk Upload P1: `project_groups`/`projects` tables + tolerant `project_id` ALTER + `resolve_group_project` match-or-create in `db.rs` (session 64).
+- [x] **11b** — Bulk Upload P2: 10-col parser (`project_group`+`project`) + pure `dedup_rows` per PLAN §5; 76 app-lib tests green (session 65).
 
 ## Session model: Sonnet (default) | Opus gate on planning/complex design | Haiku for trivial tasks
 - Read NEXTSTEPS.md at start. Scan for incomplete steps:

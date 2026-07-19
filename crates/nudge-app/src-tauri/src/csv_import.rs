@@ -21,6 +21,8 @@ use serde::Serialize;
 /// Canonical field → accepted header aliases (all matched lower-cased + trimmed).
 /// The first entry of each row is the canonical name written by the template.
 const ALIASES: &[(&str, &[&str])] = &[
+    ("project_group", &["project_group", "group"]),
+    ("project", &["project"]),
     ("title", &["title"]),
     ("description", &["description", "desc"]),
     ("deadline", &["deadline", "due"]),
@@ -37,6 +39,12 @@ const ALIASES: &[(&str, &[&str])] = &[
 /// and inline-edit exactly what the user supplied.
 pub struct ImportRow {
     pub form: NewTaskForm,
+    /// Resolved-on-confirm Project Group name (empty ⇒ unfiled). Blank group with
+    /// a non-blank project is a row error (a project needs a group — PLAN §3).
+    pub project_group: String,
+    /// Project name within `project_group` (empty ⇒ unfiled under group, or fully
+    /// unfiled when the group is also empty).
+    pub project: String,
     pub raw: Vec<(String, String)>,
     pub valid: bool,
     pub errors: Vec<String>,
@@ -48,6 +56,8 @@ pub struct ImportRow {
 #[derive(Serialize)]
 pub struct ImportRowDto {
     pub form: NewTaskForm,
+    pub project_group: String,
+    pub project: String,
     pub raw: Vec<(String, String)>,
     pub valid: bool,
     pub errors: Vec<String>,
@@ -57,6 +67,8 @@ impl From<ImportRow> for ImportRowDto {
     fn from(r: ImportRow) -> Self {
         ImportRowDto {
             form: r.form,
+            project_group: r.project_group,
+            project: r.project,
             raw: r.raw,
             valid: r.valid,
             errors: r.errors,
@@ -170,6 +182,14 @@ fn build_row(fields: Vec<(String, String)>, has_title: bool) -> ImportRow {
         errors.push("title is empty".to_string());
     }
 
+    // project_group / project (optional, resolved on confirm). A project without
+    // its group is a row error — the hierarchy needs a group to file it under.
+    let project_group = field(&fields, "project_group").unwrap_or("").to_string();
+    let project = field(&fields, "project").unwrap_or("").to_string();
+    if !project.is_empty() && project_group.is_empty() {
+        errors.push("project has no project_group".to_string());
+    }
+
     let desc = field(&fields, "description").unwrap_or("").to_string();
     let task_type = field(&fields, "task_type").unwrap_or("").to_string();
 
@@ -244,6 +264,8 @@ fn build_row(fields: Vec<(String, String)>, has_title: bool) -> ImportRow {
 
     ImportRow {
         form,
+        project_group,
+        project,
         raw: fields,
         valid: errors.is_empty(),
         errors,
@@ -263,17 +285,107 @@ fn broken_row(msg: String) -> ImportRow {
             mode_override: None,
             estimate_minutes: None,
         },
+        project_group: String::new(),
+        project: String::new(),
         raw: Vec::new(),
         valid: false,
         errors: vec![msg],
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dedup (PLAN-bulk-upload.md §5) — pure over an injected existing-key set.
+// ---------------------------------------------------------------------------
+
+use std::collections::HashSet;
+
+/// Normalize a title to its dedup key: trimmed + case-folded (NOCASE).
+fn title_key(title: &str) -> String {
+    title.trim().to_ascii_lowercase()
+}
+
+/// The set of title/deadline keys already present, against which incoming rows
+/// are deduped. Built by the caller from a live snapshot of **active** tasks and
+/// grown in place as sheet rows are accepted (so intra-sheet dupes collapse).
+#[derive(Default)]
+pub struct ExistingKeys {
+    titles: HashSet<String>,
+    /// `None` represents a deadline-less task; it only collides with other
+    /// deadline-less rows.
+    deadlines: HashSet<Option<i64>>,
+}
+
+impl ExistingKeys {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reserve a task's title + deadline so later rows collide against it.
+    pub fn insert(&mut self, title: &str, deadline: Option<i64>) {
+        self.titles.insert(title_key(title));
+        self.deadlines.insert(deadline);
+    }
+}
+
+/// One row dropped by dedup, paired with the human-readable matched reason.
+pub struct IgnoredRow {
+    pub row: ImportRow,
+    pub reason: String,
+}
+
+/// Result of [`dedup_rows`]: rows to show in the valid table vs. the report block.
+pub struct DedupOutcome {
+    pub new_rows: Vec<ImportRow>,
+    pub ignored: Vec<IgnoredRow>,
+}
+
+/// Partition parsed rows into new-unique vs. ignored-duplicate (§5).
+///
+/// A **valid** row is unique iff **both** its title AND deadline are unused; if
+/// either already exists (in `existing`, or an earlier accepted sheet row) the
+/// row is ignored with the matched reason. Accepted rows reserve their keys so
+/// intra-sheet dupes collapse (first occurrence wins). Invalid rows bypass dedup
+/// entirely — they flow to `new_rows` to be shown invalid, and never reserve keys.
+pub fn dedup_rows(rows: Vec<ImportRow>, existing: &mut ExistingKeys) -> DedupOutcome {
+    let mut new_rows = Vec::new();
+    let mut ignored = Vec::new();
+
+    for row in rows {
+        if !row.valid {
+            new_rows.push(row);
+            continue;
+        }
+
+        let tkey = title_key(&row.form.title);
+        let dkey = row.form.deadline;
+        let title_hit = existing.titles.contains(&tkey);
+        let deadline_hit = existing.deadlines.contains(&dkey);
+
+        if title_hit {
+            let reason = format!("title \"{}\" already exists", row.form.title.trim());
+            ignored.push(IgnoredRow { row, reason });
+        } else if deadline_hit {
+            let reason = match dkey {
+                Some(ts) => format!("deadline {ts} already exists"),
+                None => "empty deadline already exists".to_string(),
+            };
+            ignored.push(IgnoredRow { row, reason });
+        } else {
+            existing.titles.insert(tkey);
+            existing.deadlines.insert(dkey);
+            new_rows.push(row);
+        }
+    }
+
+    DedupOutcome { new_rows, ignored }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const HEADER: &str = "title,description,deadline,time_of_day,recur,task_type,estimate_minutes,mode";
+    const HEADER: &str =
+        "project_group,project,title,description,deadline,time_of_day,recur,task_type,estimate_minutes,mode";
 
     fn parse(rows: &str) -> Vec<ImportRow> {
         parse_import(&format!("{HEADER}\n{rows}"))
@@ -281,7 +393,7 @@ mod tests {
 
     #[test]
     fn full_valid_row() {
-        let rows = parse("Ship report,Q3 numbers,2026-08-01T14:30,,mon wed fri,work,90,off_task");
+        let rows = parse(",,Ship report,Q3 numbers,2026-08-01T14:30,,mon wed fri,work,90,off_task");
         assert_eq!(rows.len(), 1);
         let r = &rows[0];
         assert!(r.valid, "errors: {:?}", r.errors);
@@ -298,14 +410,14 @@ mod tests {
 
     #[test]
     fn explicit_time_of_day_wins_over_deadline_time() {
-        let rows = parse("x,,2026-08-01T14:30,09:15,,,,");
+        let rows = parse(",,x,,2026-08-01T14:30,09:15,,,,");
         assert!(rows[0].valid);
         assert_eq!(rows[0].form.minutes, Some(9 * 60 + 15));
     }
 
     #[test]
     fn date_only_deadline_leaves_minutes_none() {
-        let rows = parse("x,,2026-08-01,,,,,");
+        let rows = parse(",,x,,2026-08-01,,,,,");
         assert!(rows[0].valid);
         assert!(rows[0].form.deadline.is_some());
         assert_eq!(rows[0].form.minutes, None);
@@ -313,7 +425,7 @@ mod tests {
 
     #[test]
     fn missing_title_is_invalid() {
-        let rows = parse(",no title,,,,,,");
+        let rows = parse(",,,no title,,,,,,");
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].valid);
         assert!(rows[0].errors.iter().any(|e| e.contains("title")));
@@ -321,7 +433,7 @@ mod tests {
 
     #[test]
     fn bad_date_time_recur_estimate_each_error() {
-        let rows = parse("x,,2026-13-01,25:00,funday,,notanint,");
+        let rows = parse(",,x,,2026-13-01,25:00,funday,,notanint,");
         let r = &rows[0];
         assert!(!r.valid);
         assert_eq!(r.errors.len(), 4, "errors: {:?}", r.errors);
@@ -329,14 +441,14 @@ mod tests {
 
     #[test]
     fn unknown_mode_is_none_not_error() {
-        let rows = parse("x,,,,,,,bogus");
+        let rows = parse(",,x,,,,,,,bogus");
         assert!(rows[0].valid);
         assert_eq!(rows[0].form.mode_override, None);
     }
 
     #[test]
     fn blank_rows_skipped() {
-        let rows = parse("a,,,,,,,\n,,,,,,,\n   ,,,,,,,\nb,,,,,,,");
+        let rows = parse(",,a,,,,,,,\n,,,,,,,,,\n   ,,,,,,,,,\n,,b,,,,,,,");
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].form.title, "a");
         assert_eq!(rows[1].form.title, "b");
@@ -381,5 +493,143 @@ mod tests {
         assert!(rows[0].form.deadline.is_some());
         assert_eq!(rows[0].form.task_type, "errand");
         assert_eq!(rows[0].form.estimate_minutes, Some(15));
+    }
+
+    // --- P2: project_group / project columns --------------------------------
+
+    #[test]
+    fn group_and_project_captured() {
+        let rows = parse("Marketing,Q3 Launch,Draft brief,,,,,,,");
+        let r = &rows[0];
+        assert!(r.valid, "errors: {:?}", r.errors);
+        assert_eq!(r.project_group, "Marketing");
+        assert_eq!(r.project, "Q3 Launch");
+        assert_eq!(r.form.title, "Draft brief");
+    }
+
+    #[test]
+    fn group_without_project_is_valid_unfiled_project() {
+        let rows = parse("Marketing,,Draft brief,,,,,,,");
+        assert!(rows[0].valid, "errors: {:?}", rows[0].errors);
+        assert_eq!(rows[0].project_group, "Marketing");
+        assert_eq!(rows[0].project, "");
+    }
+
+    #[test]
+    fn project_without_group_is_error() {
+        let rows = parse(",Q3 Launch,Draft brief,,,,,,,");
+        let r = &rows[0];
+        assert!(!r.valid);
+        assert!(r.errors.iter().any(|e| e.contains("project_group")));
+    }
+
+    #[test]
+    fn group_alias_group() {
+        let text = "group,project,title\nOps,Migration,Backup DB";
+        let rows = parse_import(text);
+        assert!(rows[0].valid, "errors: {:?}", rows[0].errors);
+        assert_eq!(rows[0].project_group, "Ops");
+        assert_eq!(rows[0].project, "Migration");
+    }
+
+    // --- P2: dedup ----------------------------------------------------------
+
+    /// Build a valid ImportRow with the given title/deadline for dedup tests.
+    fn row(title: &str, deadline: Option<i64>) -> ImportRow {
+        let rows = parse_import(&format!(
+            "title,deadline\n{title},{}",
+            deadline
+                .map(|_| "2026-08-01T00:00")
+                .unwrap_or("")
+        ));
+        let mut r = rows.into_iter().next().unwrap();
+        // Override with the exact injected deadline (parse gives a real unix ts).
+        r.form.deadline = deadline;
+        assert!(r.valid, "seed row invalid: {:?}", r.errors);
+        r
+    }
+
+    #[test]
+    fn dedup_unique_row_passes() {
+        let mut ex = ExistingKeys::new();
+        ex.insert("Existing", Some(100));
+        let out = dedup_rows(vec![row("Fresh", Some(200))], &mut ex);
+        assert_eq!(out.new_rows.len(), 1);
+        assert!(out.ignored.is_empty());
+    }
+
+    #[test]
+    fn dedup_title_collision_ignored() {
+        let mut ex = ExistingKeys::new();
+        ex.insert("Report", Some(100));
+        // Different deadline, same title (NOCASE) → ignored on title.
+        let out = dedup_rows(vec![row("report", Some(999))], &mut ex);
+        assert!(out.new_rows.is_empty());
+        assert_eq!(out.ignored.len(), 1);
+        assert!(out.ignored[0].reason.contains("title"));
+    }
+
+    #[test]
+    fn dedup_deadline_collision_ignored() {
+        let mut ex = ExistingKeys::new();
+        ex.insert("Report", Some(555));
+        let out = dedup_rows(vec![row("Totally new", Some(555))], &mut ex);
+        assert!(out.new_rows.is_empty());
+        assert_eq!(out.ignored.len(), 1);
+        assert!(out.ignored[0].reason.contains("deadline"));
+    }
+
+    #[test]
+    fn dedup_empty_deadline_only_collides_with_empty() {
+        let mut ex = ExistingKeys::new();
+        ex.insert("Has empty", None);
+        // New title, empty deadline → collides with the existing empty deadline.
+        let out = dedup_rows(vec![row("Brand new", None)], &mut ex);
+        assert!(out.new_rows.is_empty());
+        assert_eq!(out.ignored.len(), 1);
+    }
+
+    #[test]
+    fn dedup_both_empty_first_wins_intra_sheet() {
+        let mut ex = ExistingKeys::new();
+        let out = dedup_rows(
+            vec![row("Alpha", None), row("Beta", None)],
+            &mut ex,
+        );
+        // First deadline-less row accepted; second collides on empty deadline.
+        assert_eq!(out.new_rows.len(), 1);
+        assert_eq!(out.new_rows[0].form.title, "Alpha");
+        assert_eq!(out.ignored.len(), 1);
+        assert_eq!(out.ignored[0].row.form.title, "Beta");
+    }
+
+    #[test]
+    fn dedup_intra_sheet_title_dupe_reported() {
+        let mut ex = ExistingKeys::new();
+        let out = dedup_rows(
+            vec![row("Same", Some(1)), row("same", Some(2))],
+            &mut ex,
+        );
+        assert_eq!(out.new_rows.len(), 1);
+        assert_eq!(out.ignored.len(), 1);
+        assert!(out.ignored[0].reason.contains("title"));
+    }
+
+    #[test]
+    fn dedup_invalid_rows_bypass_and_dont_reserve_keys() {
+        let mut ex = ExistingKeys::new();
+        // An invalid row (project without group) with title "Dup".
+        let invalid = {
+            let mut r = parse(",Proj,Dup,,,,,,,").into_iter().next().unwrap();
+            assert!(!r.valid);
+            r.form.deadline = Some(7);
+            r
+        };
+        let valid = row("Dup", Some(7));
+        let out = dedup_rows(vec![invalid, valid], &mut ex);
+        // Invalid row flows to new_rows shown-invalid; it did NOT reserve "Dup",
+        // so the following valid "Dup" is accepted (not reported a collision).
+        assert_eq!(out.new_rows.len(), 2);
+        assert!(out.ignored.is_empty());
     }
 }
