@@ -2,23 +2,14 @@
 <!-- Boundary: forward-looking task queue only. Completed-step detail lives in HISTORY.md.
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below. -->
 
-Last completed: session 62 — Step 7 P4 (CSV import tests: `insert_batch` atomicity/ordering, empty no-op, end-to-end mixed valid/broken pipeline). Step 7 **fully complete**.
-Next open: **step 9** (UI-PLAN §7 rework — planned, [UI-PLAN.md](UI-PLAN.md) §7), **step 8** (fix Gmail scan 403),
+Last completed: session 63 — Step 8 (Gmail scan 403 → actionable reconnect message: `request_err` in `google/gmail.rs` maps 403 to a Reset-connection/Reconnect hint; scope + reconnect path already correct; 7 gmail tests green).
+Next open: **step 9** (UI-PLAN §7 rework — planned, [UI-PLAN.md](UI-PLAN.md) §7),
 and **step 11** (Bulk Upload: hierarchy + spreadsheet ingest — planned, [PLAN-bulk-upload.md](PLAN-bulk-upload.md)).
 Step 6 (nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
 
 ## Open steps
 - [ ] **9 — UI-PLAN §7 rework: Tasks nomenclature, Task↔Event binding, Settings/Calendar, Tools launch** | **Opus** | ~2–3d | **PLANNED → [UI-PLAN.md](UI-PLAN.md) §7**
   Requested 2026-07-18. Four areas: (a) **§7.1** rename Trigger→Task + start time→**Deadline** app-wide, reorder Tasks tab (Quick Add top / Suggested bottom), `trigger_source`→`task_source`; (b) **§7.2** bidirectional Task↔Calendar Event binding (auto-tie on create, default event = Deadline→Deadline+1h, edit propagation to GCal, Task-bound events excluded from Suggested, calendar event-click menu Add Task/Edit Event/Delete Event); (c) **§7.3** dedicated Settings → Calendar tab; (d) **§7.4** relabel/hide AW "Unknown (system/lock screen)" bucket, per-website resolution inside browsers, Launch-tool-from-task (web URL + Windows exe). Phase per session. **Resolved (session 58):** "Deadline" is a **field-semantics change** — `deadline` (hard unix deadline, already in the model + the sole key of `display_list`) becomes the primary user-facing task time; the fire `minutes` derives from it (same pattern as step 4 + CSV import). **§7.1 backend DONE (session 58):** `trigger_source`→`task_source` renamed across DB column (both crates, byte-identical CREATE), DTO/JSON API, and `Task` field; back-compat `RENAME COLUMN` migration in both crates + a legacy-DB migration test; internal `TriggerSource` type kept. Workspace 41 + app 58 tests green. **§7.1 DONE (session 60):** Svelte relabel — tab "Triggers"→"Tasks" (App.svelte label; internal id kept), Planner "New task", Tasks page header "Tasks" / "Full task" / "Create task"; Deadline-first binding — dropped standalone Time-of-day field, `minutes` now derives from Deadline's time-of-day (`minutesFromDeadline`); tab reorder — Quick Add + Full task on top, Suggested moved to bottom. `npm run build` green. **§7.1 fully complete; next phase: §7.2** (Task↔Event binding).
-
-- [ ] **8 — Fix "Scan Gmail + Calendar" 403** | **Sonnet** | ~0.5–2h
-  Reported 2026-07-17: `messages.list ... status code 403` on the inbox scan. Likely a **stale OAuth scope** —
-  `gmail.readonly` was added last (step 10e, google/mod.rs SCOPES); a Google connection made before 10e holds
-  only calendar scopes, so the cached token can't call `users.messages.list` (403 insufficient permission).
-  Fix: (1) confirm `TokenCache.scope` (google/mod.rs) lacks `gmail.readonly`; (2) primary fix — **reconnect
-  Google** (`google_connect` re-consents with `prompt=consent`) and re-scan; (3) if still 403, verify the
-  **Gmail API is enabled** in the GCP project (console setting, not code). Add a UI hint: on a Gmail 403,
-  surface "Reconnect Google to grant mail access" instead of the raw error. Calendar half is unaffected.
 
 - [ ] **11 — Bulk Upload: task hierarchy + spreadsheet ingest** | **PLANNED → [PLAN-bulk-upload.md](PLAN-bulk-upload.md)**
   Requested 2026-07-19. Extends step 7 (CSV import). Adds a Project Groups → Projects → Tasks hierarchy
@@ -50,6 +41,7 @@ Step 6 (nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
 - [x] **3** — Renderers consume `meta.style_bands` (session 55).
 - [x] **4** — Deadline-only tasks + undated-once suggestions (session 56).
 - [x] **5** — Custom pause duration via `[escalation] custom_pause_secs` (session 57).
+- [x] **8** — Gmail scan 403 → actionable reconnect message (`request_err` in `google/gmail.rs`; scope + reconnect path already correct) (session 63).
 - [x] **7** — CSV bulk task import: P1 parser (58) · P2 `insert_batch`+cmds (59) · P3 `CsvImport.svelte` filter screen (61) · P4 batch/e2e tests, 61 app-lib tests green (session 62).
 
 ## Session model: Sonnet (default) | Opus gate on planning/complex design | Haiku for trivial tasks

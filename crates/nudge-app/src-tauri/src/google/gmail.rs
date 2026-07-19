@@ -29,6 +29,22 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
+/// Turn a Gmail request error into a user-facing string. A **403** here almost
+/// always means the cached token predates the `gmail.readonly` scope (10e):
+/// calendar-only grants can't call `users.messages.*`, so Gmail rejects with
+/// insufficient permission. Surface the actionable fix — reconnect Google to
+/// re-consent — rather than the raw `ureq` status line. Other statuses/transport
+/// errors keep the plain `{context}: {e}` shape used across the google module.
+fn request_err(context: &str, e: ureq::Error) -> String {
+    if let ureq::Error::Status(403, _) = e {
+        return "Reconnect Google to grant mail access — the current connection \
+                lacks Gmail permission (403). In the Google panel, click Reset \
+                connection, then Reconnect and approve the Gmail permission."
+            .to_string();
+    }
+    format!("{context}: {e}")
+}
+
 /// `GET /users/me/messages?q=<query>&maxResults=<n>` — the ids of messages
 /// matching a Gmail search query (e.g. `in:inbox is:unread newer_than:7d`).
 /// Returns ids only; [`get_message`] resolves each to its metadata.
@@ -43,7 +59,7 @@ pub fn list_message_ids(
         .query("q", query)
         .query("maxResults", &max_results.to_string())
         .call()
-        .map_err(|e| format!("messages.list request failed: {e}"))?;
+        .map_err(|e| request_err("messages.list request failed", e))?;
     let json: Value = resp
         .into_json()
         .map_err(|e| format!("bad messages.list response: {e}"))?;
@@ -62,7 +78,7 @@ pub fn get_message(access_token: &str, id: &str) -> Result<EmailCandidate, Strin
         .query("metadataHeaders", "From")
         .query("metadataHeaders", "Date")
         .call()
-        .map_err(|e| format!("messages.get request failed ({id}): {e}"))?;
+        .map_err(|e| request_err(&format!("messages.get request failed ({id})"), e))?;
     let json: Value = resp
         .into_json()
         .map_err(|e| format!("bad messages.get response: {e}"))?;
@@ -188,6 +204,23 @@ mod tests {
     fn parse_message_defaults_missing_subject() {
         let v = json!({"id": "m2", "payload": {"headers": []}});
         assert_eq!(parse_message(&v).unwrap().subject, "(no subject)");
+    }
+
+    #[test]
+    fn request_err_403_prompts_reconnect() {
+        let resp = ureq::Response::new(403, "Forbidden", "insufficient permission").unwrap();
+        let msg = request_err("messages.list request failed", ureq::Error::Status(403, resp));
+        assert!(msg.contains("Reconnect Google"));
+        assert!(msg.contains("403"));
+        // The raw ureq status line must not leak through.
+        assert!(!msg.contains("messages.list request failed"));
+    }
+
+    #[test]
+    fn request_err_other_status_keeps_context() {
+        let resp = ureq::Response::new(500, "Server Error", "boom").unwrap();
+        let msg = request_err("messages.list request failed", ureq::Error::Status(500, resp));
+        assert!(msg.starts_with("messages.list request failed:"));
     }
 
     #[test]

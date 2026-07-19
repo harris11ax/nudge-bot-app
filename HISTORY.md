@@ -435,3 +435,21 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
   unrelated: `hotkey::Trigger` never used, `persist::app_class` never used). Not committed. Not
   live-driven — config parsing + tray-menu-id plumbing only, same risk class as the already
   live-verified "Default (rules)" item (session 54), so static verify was judged sufficient.
+
+## Session 63 (2026-07-19) — Step 8: Gmail scan 403 → actionable reconnect message
+- Confirmed the scope side is already correct: `google/mod.rs` `SCOPES` includes
+  `https://www.googleapis.com/auth/gmail.readonly` (added in 10e), and the reconnect path exists —
+  `google_disconnect` drops the cached token, `google_connect` re-runs full consent (`prompt=consent`),
+  so the runtime fix for a pre-10e calendar-only token is a user **Reset connection → Reconnect**. The
+  `GoogleConnect.svelte` panel already renders both buttons plus a "Gmail scan returning 403?" hint.
+- The missing piece was the error surface: a 403 from `users.messages.list` propagated as the raw
+  `ureq` status line ("messages.list request failed: http status: 403"). Added `request_err(context, e)`
+  in `google/gmail.rs` — on `ureq::Error::Status(403, _)` it returns an actionable string
+  ("Reconnect Google to grant mail access … click Reset connection, then Reconnect and approve the Gmail
+  permission"); every other status/transport error keeps the plain `{context}: {e}` shape. Wired into
+  both `list_message_ids` and `get_message`. The scan command bubbles the string straight to the toast,
+  so the user sees the fix instead of an HTTP code.
+- Tests: `request_err_403_prompts_reconnect` (403 → reconnect text, no raw context leak) and
+  `request_err_other_status_keeps_context` (500 → keeps `{context}:` prefix). `cargo test --lib
+  google::gmail`: 7 passed, 0 failed. Backend-only, no svc change. Not committed. The remaining runtime
+  step (actually reconnecting Google) is a user action the UI now clearly directs.
