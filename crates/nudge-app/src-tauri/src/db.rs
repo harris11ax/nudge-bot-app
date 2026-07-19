@@ -384,6 +384,61 @@ impl Store {
         Ok(ids)
     }
 
+    /// Fetch one task by rowid, or `None` if unknown. Used by edit-propagation
+    /// (§7.2) to read a task's current `gcal_event_id` before pushing the edit.
+    pub fn get(&self, id: i64) -> rusqlite::Result<Option<Task>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, description, deadline, task_type, minutes,
+                    recur, mode_override, task_source, gcal_event_id,
+                    estimate_minutes, logged_minutes
+             FROM tasks WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query_map(rusqlite::params![id], |r| {
+            let recur_spec: String = r.get(6)?;
+            let mode_s: Option<String> = r.get(7)?;
+            let source_s: String = r.get(8)?;
+            Ok(Task {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                desc: r.get(2)?,
+                deadline: r.get(3)?,
+                task_type: r.get(4)?,
+                minutes: r.get::<_, Option<i64>>(5)?.map(|m| m as u32),
+                recur: Recur::parse(&recur_spec).unwrap_or(Recur::Once),
+                mode_override: mode_s.as_deref().and_then(parse_mode),
+                task_source: TriggerSource::from_label(&source_s),
+                gcal_event_id: r.get(9)?,
+                estimate_minutes: r.get::<_, Option<i64>>(10)?.map(|m| m as u32),
+                logged_minutes: r.get::<_, i64>(11)? as u32,
+            })
+        })?;
+        rows.next().transpose()
+    }
+
+    /// Update the user-editable fields of a task in place (§7.2 edit). Deliberately
+    /// does NOT touch `task_source`, `gcal_event_id`, `project_id`, or the svc-owned
+    /// `logged_minutes`: origin, event binding, hierarchy, and accrual survive an
+    /// edit. Returns the number of rows touched (0 if the id is unknown).
+    pub fn update(&self, id: i64, t: &Task) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "UPDATE tasks SET
+                title = ?1, description = ?2, deadline = ?3, task_type = ?4,
+                minutes = ?5, recur = ?6, mode_override = ?7, estimate_minutes = ?8
+             WHERE id = ?9",
+            rusqlite::params![
+                t.title,
+                t.desc,
+                t.deadline,
+                t.task_type,
+                t.minutes.map(|m| m as i64),
+                t.recur.to_spec(),
+                mode_label(t.mode_override),
+                t.estimate_minutes.map(|m| m as i64),
+                id,
+            ],
+        )
+    }
+
     /// Delete by rowid. Returns the number of rows removed (0 if not found).
     pub fn delete(&self, id: i64) -> rusqlite::Result<usize> {
         self.conn
@@ -956,6 +1011,64 @@ mod tests {
 
         // Unknown id touches nothing.
         assert_eq!(store.set_task_gcal_event_id(99999, Some("x")).unwrap(), 0);
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // §7.2 edit: `update` rewrites the editable fields and `get` reads them back,
+    // while origin, event binding, and svc-owned accrual survive the edit.
+    #[test]
+    fn update_rewrites_editable_fields_and_preserves_binding() {
+        let (store, path) = temp_store("update");
+        let t = Task {
+            id: None,
+            title: "draft".into(),
+            desc: "old".into(),
+            deadline: Some(1_784_000_000),
+            task_type: String::new(),
+            minutes: Some(30),
+            recur: Recur::Once,
+            mode_override: None,
+            task_source: TriggerSource::Gcal,
+            gcal_event_id: None,
+            estimate_minutes: None,
+            logged_minutes: 0,
+        };
+        let id = store.insert(&t).unwrap();
+        // Simulate a bound event + accrued svc time that must not be clobbered.
+        store.set_task_gcal_event_id(id, Some("evt-7")).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET logged_minutes = 12 WHERE id = ?1",
+                rusqlite::params![id],
+            )
+            .unwrap();
+
+        let mut edited = t.clone();
+        edited.title = "final".into();
+        edited.desc = "new".into();
+        edited.deadline = Some(1_785_000_000);
+        edited.minutes = Some(45);
+        // These fields are ignored by `update` (source/binding not carried on form).
+        edited.task_source = TriggerSource::Manual;
+        edited.gcal_event_id = None;
+        assert_eq!(store.update(id, &edited).unwrap(), 1);
+
+        let got = store.get(id).unwrap().unwrap();
+        assert_eq!(got.title, "final");
+        assert_eq!(got.desc, "new");
+        assert_eq!(got.deadline, Some(1_785_000_000));
+        assert_eq!(got.minutes, Some(45));
+        // Preserved: origin, binding, accrual.
+        assert_eq!(got.task_source, TriggerSource::Gcal);
+        assert_eq!(got.gcal_event_id.as_deref(), Some("evt-7"));
+        assert_eq!(got.logged_minutes, 12);
+
+        // Unknown id touches nothing; `get` on it is None.
+        assert_eq!(store.update(99999, &edited).unwrap(), 0);
+        assert!(store.get(99999).unwrap().is_none());
 
         drop(store);
         let _ = std::fs::remove_file(&path);

@@ -376,6 +376,92 @@ fn try_autotie(store: &Store, task_id: i64, title: &str, deadline: Option<i64>) 
     Some(event.event_id)
 }
 
+/// §7.2 edit-propagation: push a task's edited title/Deadline onto its bound
+/// Calendar Event. Best-effort and non-fatal, mirroring [`try_autotie`] — an
+/// unbound task, a task that lost its Deadline, no primary calendar, or an
+/// offline/auth failure simply leaves the local task edited and the event as-is
+/// (GOOGLE-PLAN.md constraint #4). Returns the event id still bound afterwards.
+fn try_propagate_event(
+    store: &Store,
+    event_id: &str,
+    title: &str,
+    deadline: Option<i64>,
+) -> Option<String> {
+    // No Deadline anymore ⇒ nothing to anchor the event to; leave it untouched.
+    let deadline = deadline?;
+    let calendar_id = store.primary_calendar_id().ok().flatten()?;
+
+    let duration = store
+        .get_meta("default_event_secs")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|d| *d > 0)
+        .unwrap_or(DEFAULT_EVENT_SECS);
+    let (start_unix, end_unix) = default_event_bounds(deadline, duration);
+
+    let token = match google::access_token() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("edit-propagation skipped (no Google token): {e}");
+            return Some(event_id.to_string());
+        }
+    };
+    match google::calendar::update_event(
+        &token,
+        &calendar_id,
+        event_id,
+        title,
+        start_unix,
+        end_unix,
+        false,
+    ) {
+        Ok(event) => {
+            // Refresh the local cache so the Calendar tab reflects the edit now.
+            let _ = store.upsert_event(&calendar_id, &event);
+            Some(event.event_id)
+        }
+        Err(e) => {
+            eprintln!("edit-propagation skipped (event update failed): {e}");
+            Some(event_id.to_string())
+        }
+    }
+}
+
+/// Update an existing task by id (§7.2). Re-validates via `form_to_task` (same
+/// title/recur/mode checks as create), writes the user-editable fields in place
+/// (origin, event binding, hierarchy, and accrual are preserved by
+/// [`db::Store::update`]), then best-effort propagates the edited title/Deadline
+/// onto the bound Calendar Event, and finally pings the svc.
+#[tauri::command]
+fn update_task(id: i64, form: NewTaskForm) -> Result<TaskDto, String> {
+    let task = form_to_task(form)?;
+    let store = open()?;
+    // Read the existing row first: its `gcal_event_id` is the propagation target
+    // and its post-edit value carries into the returned DTO.
+    let existing = store
+        .get(id)
+        .map_err(|e| format!("load task: {e}"))?
+        .ok_or_else(|| format!("task {id} not found"))?;
+    if store.update(id, &task).map_err(|e| format!("update: {e}"))? == 0 {
+        return Err(format!("task {id} not found"));
+    }
+    // Rebuild the stored task: editable fields from the form, preserved fields
+    // (id, source, binding, accrual) from the existing row.
+    let mut updated = task;
+    updated.id = Some(id);
+    updated.task_source = existing.task_source;
+    updated.gcal_event_id = existing.gcal_event_id;
+    updated.logged_minutes = existing.logged_minutes;
+    // §7.2: if the task is bound to an event, push the edit onto it.
+    if let Some(event_id) = updated.gcal_event_id.as_deref() {
+        updated.gcal_event_id =
+            try_propagate_event(&store, event_id, &updated.title, updated.deadline);
+    }
+    db::signal_reload();
+    Ok(TaskDto::from(updated))
+}
+
 fn insert_and_reload(mut task: Task) -> Result<TaskDto, String> {
     let store = open()?;
     let id = store.insert(&task).map_err(|e| format!("insert: {e}"))?;
@@ -968,6 +1054,7 @@ pub fn run() {
             list_tasks,
             add_quickadd,
             add_task,
+            update_task,
             validate_csv_import,
             import_tasks,
             validate_bulk_upload,
