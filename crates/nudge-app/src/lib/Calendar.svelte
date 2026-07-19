@@ -441,9 +441,12 @@
         {#if dialogErr}<p class="error wide">{dialogErr}</p>{/if}
         <div class="wide dialog-actions">
           {#if dialog.mode === "edit"}
-            <button type="button" onclick={() => openAddTask(dialog && events.find((e) => e.event_id === dialog.eventId))} disabled={dialogSaving}>
-              Add Task
-            </button>
+            {#if !taskEventIds.has(dialog.eventId)}
+              <!-- A task-backed event is already a task — only offer Add Task on plain events. -->
+              <button type="button" onclick={() => openAddTask(dialog && events.find((e) => e.event_id === dialog.eventId))} disabled={dialogSaving}>
+                Add Task
+              </button>
+            {/if}
             <button type="button" class="danger" onclick={deleteDialogEvent} disabled={dialogSaving}>
               Delete
             </button>
