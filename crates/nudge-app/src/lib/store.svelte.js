@@ -11,6 +11,7 @@ import {
   dismissSuggestedTrigger,
   runConnectors,
   importTasks,
+  confirmBulkUpload,
 } from "./api.js";
 
 export const store = $state({
@@ -86,6 +87,13 @@ export async function dismissSuggestion(id) {
 /** Import an approved batch of rows in one transaction, then reload the task list. */
 export async function importTaskBatch(rows) {
   const count = await importTasks(rows);
+  await refresh();
+  return count;
+}
+
+/** Confirm a bulk upload (resolve hierarchy + insert in one tx), then reload. */
+export async function bulkUploadConfirm(rows) {
+  const count = await confirmBulkUpload(rows);
   await refresh();
   return count;
 }

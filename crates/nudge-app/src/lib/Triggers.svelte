@@ -11,8 +11,12 @@
   } from "./store.svelte.js";
   import { setTaskTools } from "./api.js";
   import ToolSelector from "./ToolSelector.svelte";
+  import BulkUpload from "./BulkUpload.svelte";
 
   onMount(refreshSuggestedTriggers);
+
+  // Bulk Upload is a Tasks-page sub-view (PLAN-bulk-upload.md §6), not a rail tab.
+  let showBulk = $state(false);
 
   const sourceLabel = { manual: "Manual", gmail: "Gmail", gcal: "Calendar" };
   let suggestionErr = $state("");
@@ -126,7 +130,15 @@
   }
 </script>
 
-<header class="head"><h1>Tasks</h1></header>
+{#if showBulk}
+  <BulkUpload onBack={() => (showBulk = false)} />
+{:else}
+<header class="head">
+  <h1>Tasks</h1>
+  <button class="bulk-btn" onclick={() => (showBulk = true)} title="Upload a spreadsheet of tasks">
+    ⤓ Bulk Upload
+  </button>
+</header>
 
 <section class="card">
   <h2>Quick add</h2>
@@ -189,8 +201,15 @@
     <p class="hint">No pending suggestions. Scan to pull actionable mail and upcoming events.</p>
   {/if}
 </section>
+{/if}
 
 <style>
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+  .bulk-btn {
+    padding: 5px 12px; border: 1px solid var(--border, #333); border-radius: 6px;
+    cursor: pointer; font-size: 13px; background: transparent; color: inherit;
+  }
+  .bulk-btn:hover { filter: brightness(1.15); }
   .suggested-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
   .suggested-head h2 { margin: 0; }
   .suggested-list { list-style: none; margin: 0; padding: 0; }

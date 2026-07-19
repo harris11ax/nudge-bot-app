@@ -5,7 +5,6 @@
   import { getPendingTask } from "./lib/api.js";
   import Planner from "./lib/Planner.svelte";
   import Triggers from "./lib/Triggers.svelte";
-  import CsvImport from "./lib/CsvImport.svelte";
   import Sidebar from "./lib/Sidebar.svelte";
   import Placeholder from "./lib/Placeholder.svelte";
   import Calendar from "./lib/Calendar.svelte";
@@ -17,7 +16,6 @@
     { id: "planner", label: "Planner", icon: "▣" },
     { id: "calendar", label: "Calendar", icon: "▦" },
     { id: "triggers", label: "Tasks", icon: "＋" },
-    { id: "import", label: "Import", icon: "⤓" },
     { id: "settings", label: "Settings", icon: "⚙" },
     { id: "log", label: "Log", icon: "≡" },
   ];
@@ -90,8 +88,6 @@
       <Planner onOpenTriggers={() => (active = "triggers")} />
     {:else if active === "triggers"}
       <Triggers />
-    {:else if active === "import"}
-      <CsvImport />
     {:else if active === "calendar"}
       <Calendar />
     {:else if active === "settings"}

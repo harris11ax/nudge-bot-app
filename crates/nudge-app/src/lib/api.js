@@ -24,6 +24,22 @@ export const validateCsvImport = (text) => invoke("validate_csv_import", { text 
 /** Import a batch of client-approved rows in ONE transaction; returns the count written. */
 export const importTasks = (rows) => invoke("import_tasks", { rows });
 
+/**
+ * Parse uploaded spreadsheet bytes into new-unique vs ignored-duplicate rows
+ * (Bulk Upload §6.1). Pure read — writes nothing. `bytes` is a byte array
+ * (`Array.from(Uint8Array)`); `ext` is the source extension (`csv`/`xlsx`/`xlsm`).
+ * CSV-paste callers UTF-8 encode the text and pass `ext = "csv"`.
+ * @returns {Promise<{new_rows:Array, ignored_rows:Array<{row:Object, reason:string}>}>}
+ */
+export const validateBulkUpload = (bytes, ext) => invoke("validate_bulk_upload", { bytes, ext });
+
+/**
+ * Confirm a bulk upload in ONE transaction (Bulk Upload §6.4): server re-validates
+ * + re-dedups every row, resolves Group→Project, inserts with `project_id`, one
+ * reload. `rows` = [{form, project_group, project}]. Returns the count written.
+ */
+export const confirmBulkUpload = (rows) => invoke("confirm_bulk_upload", { rows });
+
 /** @returns {Promise<"not_configured"|"disconnected"|"connected">} Google OAuth state. */
 export const googleStatus = () => invoke("google_status");
 

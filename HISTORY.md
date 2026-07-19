@@ -453,3 +453,23 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
   `request_err_other_status_keeps_context` (500 → keeps `{context}:` prefix). `cargo test --lib
   google::gmail`: 7 passed, 0 failed. Backend-only, no svc change. Not committed. The remaining runtime
   step (actually reconnecting Google) is a user action the UI now clearly directs.
+
+## Session 68 (2026-07-19) — Step 11e / PLAN-bulk-upload P5: `BulkUpload.svelte` + Tasks-page entry
+- New `crates/nudge-app/src/lib/BulkUpload.svelte` implementing §6 UI. One unified `rows` state
+  array; an `ignored` flag + `reason` decide whether a row renders in the report block ("Ignored
+  duplicates") or the valid table ("New tasks"). Both tables are inline-editable via the same cell
+  inputs, including the leading **Group**/**Project** columns.
+- Bidirectional, rule-driven row movement (§5) with the client never deciding dedup: every cell
+  `onchange` calls `revalidateAll()`, which re-serializes ALL current rows to a canonical 10-col CSV
+  and re-invokes `validate_bulk_upload`; the fresh `new_rows`/`ignored_rows` split rebuilds both
+  tables. Fixing a dup's deadline promotes it to the valid table; reintroducing a collision demotes a
+  valid row to the report block. Include-toggles survive a re-validate via a content signature set.
+- File loading: `.csv`/`.xlsx`/`.xlsm` via `FileReader.readAsArrayBuffer` → `Array.from(Uint8Array)`
+  byte array + extension; CSV paste UTF-8 encodes with `ext = "csv"`. Confirm sends
+  `[{form, project_group, project}]` to `confirm_bulk_upload` (server re-validates + re-dedups + one tx).
+- Wiring: `validateBulkUpload`/`confirmBulkUpload` added to `api.js`; `bulkUploadConfirm` store helper
+  (confirm → `refresh`). The standalone **Import** rail tab and its `CsvImport` render were removed from
+  `App.svelte`; Bulk Upload is now a "⤓ Bulk Upload" button in the Tasks-page header toggling an
+  in-page sub-view (with a "← Tasks" back button). `CsvImport.svelte` left on disk, now unreferenced.
+- `npm run build` green (132 modules, no errors). Frontend-only; no svc/backend change. Not committed.
+  Next: 11f verify — unit matrices + live-drive a mixed `.xlsx` end-to-end.
