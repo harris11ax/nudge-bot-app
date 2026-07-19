@@ -24,11 +24,16 @@
 
   const isPicked = (name) => selected.some((t) => t.app_name === name);
 
-  // Dropdown rows: not-tools always excluded, hidden gated by the toggle,
-  // already-picked excluded, substring filter, favorites pinned above the
-  // usage-desc order the backend already provides.
+  // §7.4: AW's "unknown" bucket is the secure desktop / lock screen, not a real
+  // process — never offer it as an attachable tool, even with "show hidden".
+  const UNKNOWN = "unknown";
+
+  // Dropdown rows: the `unknown` system bucket and not-tools always excluded,
+  // hidden gated by the toggle, already-picked excluded, substring filter,
+  // favorites pinned above the usage-desc order the backend already provides.
   const rows = $derived(
     apps
+      .filter((a) => a.name !== UNKNOWN)
       .filter((a) => a.class !== "not_tool")
       .filter((a) => showHidden || a.class !== "hidden")
       .filter((a) => !isPicked(a.name))

@@ -16,6 +16,15 @@
   let ignores = $state(/** @type {Array} */ ([]));
   let err = $state("");
   let refreshing = $state(false);
+  let showHidden = $state(false);
+
+  // §7.4: AW emits "unknown" for the foreground app when it can't resolve the
+  // process (secure desktop / lock screen, elevated windows, watcher gaps).
+  // That's not a real, attachable tool — relabel it and keep it out of the main
+  // list unless the user opts to see hidden entries.
+  const UNKNOWN = "unknown";
+  const label = (name) =>
+    name === UNKNOWN ? "Unknown (system / lock screen)" : name;
 
   async function load() {
     err = "";
@@ -55,7 +64,13 @@
   }
 
   const CLASSES = ["favorite", "normal", "hidden"];
-  const classed = $derived(apps.filter((a) => a.class !== "not_tool"));
+  // The `unknown` system bucket is hidden-by-default (revealed via the "show
+  // hidden" toggle); user-classified `hidden` apps still list as before.
+  const classed = $derived(
+    apps
+      .filter((a) => a.class !== "not_tool")
+      .filter((a) => showHidden || a.name !== UNKNOWN)
+  );
   const notTools = $derived(apps.filter((a) => a.class === "not_tool"));
   const hours = (m) => (m >= 60 ? `${Math.round(m / 60)}h` : `${m}m`);
 </script>
@@ -63,9 +78,14 @@
 <section class="card">
   <div class="rowhead">
     <h2>Tools</h2>
-    <button onclick={refreshUsage} disabled={refreshing}>
-      {refreshing ? "Refreshing…" : "Refresh usage from ActivityWatch"}
-    </button>
+    <div class="head-controls">
+      <label class="toggle">
+        <input type="checkbox" bind:checked={showHidden} /> show hidden
+      </label>
+      <button onclick={refreshUsage} disabled={refreshing}>
+        {refreshing ? "Refreshing…" : "Refresh usage from ActivityWatch"}
+      </button>
+    </div>
   </div>
   {#if err}<p class="error">{err}</p>{/if}
   {#if classed.length === 0}
@@ -74,14 +94,18 @@
     <ul class="applist">
       {#each classed as a (a.name)}
         <li>
-          <span class="name">{a.name}</span>
+          <span class="name">{label(a.name)}</span>
           {#if a.minutes_90d > 0}<span class="usage">{hours(a.minutes_90d)} / 90d</span>{/if}
-          <span class="seg">
-            {#each CLASSES as c}
-              <button class:on={a.class === c} onclick={() => classify(a.name, c)}>{c}</button>
-            {/each}
-            <button class="nt" onclick={() => classify(a.name, "not_tool")}>not a tool</button>
-          </span>
+          {#if a.name === UNKNOWN}
+            <span class="sysnote">system bucket — not a tool</span>
+          {:else}
+            <span class="seg">
+              {#each CLASSES as c}
+                <button class:on={a.class === c} onclick={() => classify(a.name, c)}>{c}</button>
+              {/each}
+              <button class="nt" onclick={() => classify(a.name, "not_tool")}>not a tool</button>
+            </span>
+          {/if}
         </li>
       {/each}
     </ul>
@@ -134,6 +158,9 @@
 <style>
   .rowhead { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
   .rowhead h2 { margin: 0; }
+  .head-controls { display: flex; align-items: center; gap: 0.75rem; }
+  .toggle { font-size: 12px; color: var(--fg-muted); display: flex; gap: 0.3rem; align-items: center; white-space: nowrap; }
+  .sysnote { font-size: 12px; color: var(--fg-muted); font-style: italic; }
   .applist { list-style: none; margin: 0; padding: 0; }
   .applist li {
     display: flex;

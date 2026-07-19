@@ -868,13 +868,17 @@ impl Store {
 
     /// Not-Tool recommendation seed (§6.2 Settings): high-usage apps that have
     /// never appeared in any task's tool/ignore list and aren't already
-    /// classified. Bounded so the Settings list stays scannable.
+    /// classified. Bounded so the Settings list stays scannable. The
+    /// `unknown` bucket (§7.4 — AW's placeholder for the secure desktop / lock
+    /// screen, not a real process) is never a Not-Tool candidate: it isn't an
+    /// app the user can meaningfully mark, so it's excluded here outright.
     pub fn list_not_tool_candidates(&self, limit: i64) -> rusqlite::Result<Vec<AppRow>> {
         let mut stmt = self.conn.prepare(
             "SELECT u.app_name, u.minutes_90d, 'normal'
              FROM app_usage u
              WHERE u.app_name NOT IN (SELECT app_name FROM task_tools)
                AND u.app_name NOT IN (SELECT app_name FROM app_classes)
+               AND u.app_name <> 'unknown' COLLATE NOCASE
              ORDER BY u.minutes_90d DESC, u.app_name
              LIMIT ?1",
         )?;
@@ -1164,15 +1168,20 @@ mod tests {
         store.upsert_app_usage("code.exe", 500, 1).unwrap();
         store.upsert_app_usage("chrome.exe", 300, 1).unwrap();
         store.upsert_app_usage("game.exe", 200, 1).unwrap();
+        // §7.4: AW's lock-screen / secure-desktop placeholder. High usage but
+        // never a real, attachable process — must not be a Not-Tool candidate.
+        store.upsert_app_usage("unknown", 9999, 1).unwrap();
         store.set_app_class("code.exe", "favorite").unwrap();
         store.set_app_class("obscure.exe", "hidden").unwrap(); // classified, no usage
 
+        // The selector query returns the raw, complete list (incl. `unknown`,
+        // usage-sorted first here); the frontend relabels/hides it (§7.4).
         let apps = store.list_apps_for_selector().unwrap();
         let names: Vec<&str> = apps.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, vec!["code.exe", "chrome.exe", "game.exe", "obscure.exe"]);
-        assert_eq!(apps[0].class, "favorite");
-        assert_eq!(apps[1].class, "normal"); // usage-only app defaults normal
-        assert_eq!(apps[3].minutes_90d, 0); // class-only app defaults 0 usage
+        assert_eq!(names, vec!["unknown", "code.exe", "chrome.exe", "game.exe", "obscure.exe"]);
+        assert_eq!(apps[1].class, "favorite");
+        assert_eq!(apps[2].class, "normal"); // usage-only app defaults normal
+        assert_eq!(apps[4].minutes_90d, 0); // class-only app defaults 0 usage
 
         let classed = store.list_app_classes().unwrap();
         assert_eq!(classed.len(), 2);
