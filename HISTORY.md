@@ -516,3 +516,26 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
   calendar — not available in a scheduled run); **edit propagation** (blocked on there being no
   `update_task` command yet — tasks are create/delete-only in the app today); event-click Add/Edit/Delete
   menu (§7.2, calendar UI); Svelte surfacing of the binding.
+
+## Session 75 (2026-07-19) — Step 1: Bulk Upload GUI drive + dedup rule OR→AND
+- **GUI drive (human-present).** Regenerated `scratchpad/mixed_bulk.xlsx` (openpyxl, mirrors the e2e
+  fixture) and drove it through the live app. First launch showed a webview "localhost refused to connect":
+  a raw `cargo build --release` produces a **dev-mode** Tauri binary (webview points at devUrl
+  `localhost:1420`, no bundled assets). Fix: build via the CLI — `npm run tauri build -- --no-bundle` —
+  which bakes prod asset embedding. Use that (not raw `cargo build`) for any runnable GUI binary.
+- **Dedup rule changed at user request: OR → exact-pair AND.** A row is now a duplicate **only when its
+  title AND deadline both match** the same existing task; matching one field (same title/diff deadline, or
+  same deadline/diff title) stays unique. Goal: block only byte-identical re-entries, not near-misses.
+  - `csv_import.rs`: `ExistingKeys` reworked from two independent `HashSet`s (`titles`, `deadlines`) to one
+    `HashSet<(title_key, Option<i64>)>`; `insert`/`try_reserve` key on the pair. `dedup_rows` now reserves
+    via `try_reserve` and reports `task "X" with deadline <ts> already exists` (or `with no deadline`).
+  - Dedup unit matrix rewritten: title-only and deadline-only matches now assert **unique**; added exact-pair
+    ignored + intra-sheet exact-pair-first-wins.
+  - `lib.rs` `mixed_xlsx_bulk_upload_end_to_end`: fixture row 5 made an exact NOCASE+same-deadline dup of
+    row 1 → partition now **5 new / 1 ignored** (was 4/2); asserts the same-deadline/diff-title row survives
+    and that same-group+project tasks share `project_id`. IgnoredRowDto doc updated.
+  - `BulkUpload.svelte` report-block copy updated to the exact-pair wording.
+  - `PLAN-bulk-upload.md` §5 rewritten to the AND rule with a rule-history note.
+- **86 app-lib tests green.** GUI confirmed: same fixture now 6 valid / 0 ignored under the new rule.
+- **Not exercised in GUI (user satisfied, deferred):** bidirectional report↔valid row movement on edit;
+  Confirm-write (6 tasks + one reload). No commit.

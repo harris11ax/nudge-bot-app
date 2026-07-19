@@ -235,8 +235,8 @@ Quote any field containing a comma. My task list:
       <span class="pill bad-pill">{ignoredRows.length} ignored</span>
     </div>
     <p class="hint">
-      Each row matched an existing task's title or deadline (§5). Edit a cell to make both unique — the
-      row jumps up to the upload table.
+      Each row is an exact duplicate — its title AND deadline both match an existing task. Edit the title
+      or the deadline so the pair is unique and the row jumps up to the upload table.
     </p>
     <div class="tablewrap">
       <table class="filter">

@@ -69,12 +69,17 @@ project_group,project,title,description,deadline,time_of_day,recur,task_type,est
   (`.readAsArrayBuffer` for xlsx) — no tauri fs/dialog plugin, mirrors CsvImport.svelte P3.
 
 ## 5. Dedup rule + report block (the new gate)
-An incoming row is a **new unique Task** iff **both** its `title` and its `deadline` are absent from the
-existing `tasks` set. If **either** the title **or** the deadline already exists on any current task, the
-row is **ignored** and listed in the report block with the matched reason (`title "X" already exists` /
-`deadline <ts> already exists`). Empty deadline matches only other empty deadlines. Matching is exact:
+An incoming row is a **duplicate** iff its **exact (title, deadline) pair** already exists on a current
+task — i.e. **both** the title AND the deadline match the same existing task. Matching only one of the two
+(same title, different deadline; or same deadline, different title) leaves the row **unique**. Duplicates
+are ignored and listed in the report block with the matched reason (`task "X" with deadline <ts> already
+exists`). Empty deadline pairs only with other empty-deadline rows of the same title. Matching is exact:
 title NOCASE-trimmed; deadline on the parsed unix value. Intra-sheet duplicates collapse the same way
-(first occurrence wins, later ones reported ignored).
+(first occurrence wins, later exact-pair copies reported ignored).
+
+> **Rule history:** originally OR (ignore if title *or* deadline matched). Changed to the exact-pair AND
+> rule in session 75 at the user's request — the goal is only to block byte-identical re-entries, not
+> near-misses that share one field.
 
 Server-side (`validate_bulk_upload`) computes this against a live `list_tasks` snapshot of **active** tasks
 (completed/archived history is not consulted) so the report can't drift from the DB; the client never

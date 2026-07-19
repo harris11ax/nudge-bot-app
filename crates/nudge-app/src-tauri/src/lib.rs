@@ -210,7 +210,8 @@ fn import_tasks(rows: Vec<NewTaskForm>) -> Result<usize, String> {
 // --- Bulk Upload (PLAN-bulk-upload.md §7 P4) ---
 
 /// One row dropped by dedup, for the report block: the row DTO plus the matched
-/// reason (`title "X" already exists` / `deadline <ts> already exists`).
+/// reason (`task "X" with deadline <ts> already exists` — an exact title+deadline
+/// duplicate; matching only one of the two is not a duplicate).
 #[derive(Serialize)]
 pub struct IgnoredRowDto {
     pub row: csv_import::ImportRowDto,
@@ -1216,8 +1217,8 @@ mod import_e2e_tests {
             ("Company Work", "Q3 Launch", "Draft launch announcement", "2026-07-27"), // new
             ("Research Group", "Grant Proposal", "Write methods section", "2026-08-03"), // new
             ("", "", "Read transformer scaling paper", ""), // new, unfiled, empty deadline
-            ("Company Work", "Q3 Launch", "send revised budget", "2026-07-25"), // dup TITLE (NOCASE) of row1
-            ("Research Group", "Grant Proposal", "Collect co-author CVs", "2026-07-24"), // dup DEADLINE of row1
+            ("Company Work", "Q3 Launch", "send revised budget", "2026-07-24"), // EXACT dup of row1 (NOCASE title + same deadline)
+            ("Research Group", "Grant Proposal", "Collect co-author CVs", "2026-07-24"), // same deadline as row1, different title → still new
         ];
         let mut wb = Workbook::new();
         let ws = wb.add_worksheet();
@@ -1246,21 +1247,29 @@ mod import_e2e_tests {
         let mut existing = existing_keys(&store).unwrap(); // empty DB snapshot
         let outcome = csv_import::dedup_rows(rows, &mut existing);
 
-        // Report partition: 4 new-unique, 2 ignored (one title, one deadline).
-        assert_eq!(outcome.new_rows.len(), 4, "rows 1-4 are new-unique");
-        assert_eq!(outcome.ignored.len(), 2, "rows 5-6 are duplicates");
-        let title_dup = outcome
-            .ignored
-            .iter()
-            .find(|ig| ig.row.form.title.eq_ignore_ascii_case("send revised budget"))
-            .expect("title-dup row reported");
-        assert!(title_dup.reason.contains("title"), "reason: {}", title_dup.reason);
-        let dl_dup = outcome
-            .ignored
-            .iter()
-            .find(|ig| ig.row.form.title == "Collect co-author CVs")
-            .expect("deadline-dup row reported");
-        assert!(dl_dup.reason.contains("deadline"), "reason: {}", dl_dup.reason);
+        // Report partition (§5 exact-pair rule): 5 new-unique, 1 ignored — only
+        // the row whose title AND deadline both match an existing task is a dup.
+        // The same-deadline-different-title row (Collect co-author CVs) stays new.
+        assert_eq!(outcome.new_rows.len(), 5, "rows 1-4 + 6 are new-unique");
+        assert_eq!(outcome.ignored.len(), 1, "only the exact-pair row is a dup");
+        let exact_dup = &outcome.ignored[0];
+        assert!(
+            exact_dup.row.form.title.eq_ignore_ascii_case("send revised budget"),
+            "exact-pair dup row reported: {}",
+            exact_dup.row.form.title
+        );
+        assert!(
+            exact_dup.reason.contains("already exists"),
+            "reason: {}",
+            exact_dup.reason
+        );
+        assert!(
+            outcome
+                .new_rows
+                .iter()
+                .any(|r| r.form.title == "Collect co-author CVs"),
+            "same-deadline/different-title row survives as new"
+        );
 
         // === confirm_bulk_upload body (only the new_rows, as the UI would) ======
         let mut confirm = existing_keys(&store).unwrap(); // fresh live snapshot
@@ -1274,13 +1283,13 @@ mod import_e2e_tests {
             }
             items.push(db::BulkInsert { task, group, project });
         }
-        assert_eq!(items.len(), 4, "all 4 new rows survive re-dedup");
+        assert_eq!(items.len(), 5, "all 5 new rows survive re-dedup");
         let ids = store.insert_bulk(&items).unwrap();
-        assert_eq!(ids.len(), 4, "4 tasks written in one transaction");
+        assert_eq!(ids.len(), 5, "5 tasks written in one transaction");
 
         // === DB end-state (reopen the file to read project_id + hierarchy) =====
         let stored = store.list().unwrap();
-        assert_eq!(stored.len(), 4);
+        assert_eq!(stored.len(), 5);
         drop(store);
         let conn = rusqlite::Connection::open(&path).unwrap();
         let groups: i64 = conn
@@ -1299,14 +1308,16 @@ mod import_e2e_tests {
             )
             .unwrap()
         };
-        // The three filed tasks each carry a non-NULL project_id; the two under the
-        // same group+project share it; the unfiled row is NULL.
+        // The filed tasks each carry a non-NULL project_id; tasks under the same
+        // group+project share it; the unfiled row is NULL.
         let budget = pid("Send revised budget");
         let announce = pid("Draft launch announcement");
         let methods = pid("Write methods section");
+        let cvs = pid("Collect co-author CVs");
         assert!(budget.is_some() && announce.is_some() && methods.is_some());
         assert_eq!(budget, announce, "same Company Work → Q3 Launch project");
         assert_ne!(budget, methods, "different group/project → different id");
+        assert_eq!(methods, cvs, "same Research Group → Grant Proposal project");
         assert_eq!(pid("Read transformer scaling paper"), None, "blank group ⇒ unfiled");
 
         drop(conn);

@@ -355,15 +355,14 @@ fn title_key(title: &str) -> String {
     title.trim().to_ascii_lowercase()
 }
 
-/// The set of title/deadline keys already present, against which incoming rows
-/// are deduped. Built by the caller from a live snapshot of **active** tasks and
-/// grown in place as sheet rows are accepted (so intra-sheet dupes collapse).
+/// The set of (title, deadline) pairs already present, against which incoming
+/// rows are deduped. Built by the caller from a live snapshot of **active** tasks
+/// and grown in place as sheet rows are accepted (so intra-sheet dupes collapse).
 #[derive(Default)]
 pub struct ExistingKeys {
-    titles: HashSet<String>,
-    /// `None` represents a deadline-less task; it only collides with other
-    /// deadline-less rows.
-    deadlines: HashSet<Option<i64>>,
+    /// A duplicate is an exact match on **both** title AND deadline, so the key
+    /// is the pair. `None` deadline pairs only with other deadline-less rows.
+    pairs: HashSet<(String, Option<i64>)>,
 }
 
 impl ExistingKeys {
@@ -371,23 +370,22 @@ impl ExistingKeys {
         Self::default()
     }
 
-    /// Reserve a task's title + deadline so later rows collide against it.
+    /// Reserve a task's (title, deadline) pair so later rows collide against it.
     pub fn insert(&mut self, title: &str, deadline: Option<i64>) {
-        self.titles.insert(title_key(title));
-        self.deadlines.insert(deadline);
+        self.pairs.insert((title_key(title), deadline));
     }
 
     /// Try to reserve a (title, deadline) pair using the §5 uniqueness rule:
-    /// unique iff **both** keys are unused. Returns `true` and reserves when
-    /// unique; returns `false` (reserving nothing) when either key already
-    /// exists. Backs the server-side re-dedup in `confirm_bulk_upload` (P4).
+    /// unique iff the **pair** is unused — a row is a duplicate only when both
+    /// its title AND deadline match an existing task. Returns `true` and reserves
+    /// when unique; `false` (reserving nothing) on an exact-pair collision. Backs
+    /// the server-side re-dedup in `confirm_bulk_upload` (P4).
     pub fn try_reserve(&mut self, title: &str, deadline: Option<i64>) -> bool {
-        let tkey = title_key(title);
-        if self.titles.contains(&tkey) || self.deadlines.contains(&deadline) {
+        let key = (title_key(title), deadline);
+        if self.pairs.contains(&key) {
             return false;
         }
-        self.titles.insert(tkey);
-        self.deadlines.insert(deadline);
+        self.pairs.insert(key);
         true
     }
 }
@@ -406,11 +404,12 @@ pub struct DedupOutcome {
 
 /// Partition parsed rows into new-unique vs. ignored-duplicate (§5).
 ///
-/// A **valid** row is unique iff **both** its title AND deadline are unused; if
-/// either already exists (in `existing`, or an earlier accepted sheet row) the
-/// row is ignored with the matched reason. Accepted rows reserve their keys so
-/// intra-sheet dupes collapse (first occurrence wins). Invalid rows bypass dedup
-/// entirely — they flow to `new_rows` to be shown invalid, and never reserve keys.
+/// A **valid** row is a duplicate only when the **exact (title, deadline) pair**
+/// already exists (in `existing`, or an earlier accepted sheet row) — matching
+/// just one of the two leaves the row unique. Duplicates are ignored with the
+/// matched reason; accepted rows reserve their pair so intra-sheet exact dupes
+/// collapse (first occurrence wins). Invalid rows bypass dedup entirely — they
+/// flow to `new_rows` to be shown invalid, and never reserve keys.
 pub fn dedup_rows(rows: Vec<ImportRow>, existing: &mut ExistingKeys) -> DedupOutcome {
     let mut new_rows = Vec::new();
     let mut ignored = Vec::new();
@@ -421,24 +420,21 @@ pub fn dedup_rows(rows: Vec<ImportRow>, existing: &mut ExistingKeys) -> DedupOut
             continue;
         }
 
-        let tkey = title_key(&row.form.title);
         let dkey = row.form.deadline;
-        let title_hit = existing.titles.contains(&tkey);
-        let deadline_hit = existing.deadlines.contains(&dkey);
-
-        if title_hit {
-            let reason = format!("title \"{}\" already exists", row.form.title.trim());
-            ignored.push(IgnoredRow { row, reason });
-        } else if deadline_hit {
+        if existing.try_reserve(&row.form.title, dkey) {
+            new_rows.push(row);
+        } else {
             let reason = match dkey {
-                Some(ts) => format!("deadline {ts} already exists"),
-                None => "empty deadline already exists".to_string(),
+                Some(ts) => format!(
+                    "task \"{}\" with deadline {ts} already exists",
+                    row.form.title.trim()
+                ),
+                None => format!(
+                    "task \"{}\" with no deadline already exists",
+                    row.form.title.trim()
+                ),
             };
             ignored.push(IgnoredRow { row, reason });
-        } else {
-            existing.titles.insert(tkey);
-            existing.deadlines.insert(dkey);
-            new_rows.push(row);
         }
     }
 
@@ -624,60 +620,68 @@ mod tests {
     }
 
     #[test]
-    fn dedup_title_collision_ignored() {
+    fn dedup_title_match_different_deadline_is_unique() {
         let mut ex = ExistingKeys::new();
         ex.insert("Report", Some(100));
-        // Different deadline, same title (NOCASE) → ignored on title.
+        // Same title (NOCASE) but a different deadline → NOT a duplicate.
         let out = dedup_rows(vec![row("report", Some(999))], &mut ex);
-        assert!(out.new_rows.is_empty());
-        assert_eq!(out.ignored.len(), 1);
-        assert!(out.ignored[0].reason.contains("title"));
+        assert_eq!(out.new_rows.len(), 1);
+        assert!(out.ignored.is_empty());
     }
 
     #[test]
-    fn dedup_deadline_collision_ignored() {
+    fn dedup_deadline_match_different_title_is_unique() {
         let mut ex = ExistingKeys::new();
         ex.insert("Report", Some(555));
+        // Same deadline but a different title → NOT a duplicate.
         let out = dedup_rows(vec![row("Totally new", Some(555))], &mut ex);
-        assert!(out.new_rows.is_empty());
-        assert_eq!(out.ignored.len(), 1);
-        assert!(out.ignored[0].reason.contains("deadline"));
+        assert_eq!(out.new_rows.len(), 1);
+        assert!(out.ignored.is_empty());
     }
 
     #[test]
-    fn dedup_empty_deadline_only_collides_with_empty() {
+    fn dedup_exact_pair_ignored() {
+        let mut ex = ExistingKeys::new();
+        ex.insert("Report", Some(555));
+        // Same title (NOCASE) AND same deadline → the only duplicate case.
+        let out = dedup_rows(vec![row("report", Some(555))], &mut ex);
+        assert!(out.new_rows.is_empty());
+        assert_eq!(out.ignored.len(), 1);
+        assert!(out.ignored[0].reason.contains("already exists"));
+    }
+
+    #[test]
+    fn dedup_empty_deadline_pair_matches_only_same_title() {
         let mut ex = ExistingKeys::new();
         ex.insert("Has empty", None);
-        // New title, empty deadline → collides with the existing empty deadline.
-        let out = dedup_rows(vec![row("Brand new", None)], &mut ex);
-        assert!(out.new_rows.is_empty());
-        assert_eq!(out.ignored.len(), 1);
+        // Different title, both deadline-less → unique (title differs).
+        let unique = dedup_rows(vec![row("Brand new", None)], &mut ex);
+        assert_eq!(unique.new_rows.len(), 1);
+        assert!(unique.ignored.is_empty());
+        // Same title, both deadline-less → exact pair duplicate.
+        let dupe = dedup_rows(vec![row("Has empty", None)], &mut ex);
+        assert!(dupe.new_rows.is_empty());
+        assert_eq!(dupe.ignored.len(), 1);
     }
 
     #[test]
-    fn dedup_both_empty_first_wins_intra_sheet() {
+    fn dedup_intra_sheet_exact_pair_first_wins() {
         let mut ex = ExistingKeys::new();
-        let out = dedup_rows(
-            vec![row("Alpha", None), row("Beta", None)],
-            &mut ex,
-        );
-        // First deadline-less row accepted; second collides on empty deadline.
-        assert_eq!(out.new_rows.len(), 1);
-        assert_eq!(out.new_rows[0].form.title, "Alpha");
-        assert_eq!(out.ignored.len(), 1);
-        assert_eq!(out.ignored[0].row.form.title, "Beta");
-    }
-
-    #[test]
-    fn dedup_intra_sheet_title_dupe_reported() {
-        let mut ex = ExistingKeys::new();
+        // Same title, different deadline → both unique.
         let out = dedup_rows(
             vec![row("Same", Some(1)), row("same", Some(2))],
             &mut ex,
         );
-        assert_eq!(out.new_rows.len(), 1);
-        assert_eq!(out.ignored.len(), 1);
-        assert!(out.ignored[0].reason.contains("title"));
+        assert_eq!(out.new_rows.len(), 2);
+        assert!(out.ignored.is_empty());
+        // Same title AND same deadline → second is the ignored exact dupe.
+        let out2 = dedup_rows(
+            vec![row("Dup", Some(7)), row("dup", Some(7))],
+            &mut ExistingKeys::new(),
+        );
+        assert_eq!(out2.new_rows.len(), 1);
+        assert_eq!(out2.ignored.len(), 1);
+        assert_eq!(out2.ignored[0].row.form.title, "dup");
     }
 
     // --- P3: .xlsx reader ---------------------------------------------------
