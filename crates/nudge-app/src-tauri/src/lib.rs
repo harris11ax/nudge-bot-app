@@ -833,3 +833,54 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running nudge-app");
 }
+
+#[cfg(test)]
+mod import_e2e_tests {
+    use super::*;
+
+    // End-to-end CSV import: a mixed valid/broken blob parses to per-row verdicts,
+    // only the valid rows are converted server-side (form_to_task) and land via
+    // insert_batch — mirroring the filter-screen accept path (P4).
+    #[test]
+    fn mixed_csv_imports_only_valid_rows_end_to_end() {
+        let csv = "title,description,deadline,time_of_day,recur,task_type,estimate_minutes,mode
+\nShip report,Q3,2026-08-01T14:30,,mon wed fri,work,90,off_task
+\n,no title here,,,,,,
+\nErrand,,2026-08-02,,,errand,,
+\nBad row,,2026-13-01,25:00,funday,,notanint,
+";
+
+        // 1. Parse → verdicts (the filter screen input).
+        let rows = csv_import::parse_import(csv);
+        assert_eq!(rows.len(), 4);
+        let valid: Vec<_> = rows.into_iter().filter(|r| r.valid).collect();
+        assert_eq!(valid.len(), 2, "only Ship report + Errand are importable");
+
+        // 2. Server-side re-validation → Task (the import_tasks core).
+        let tasks: Vec<Task> = valid
+            .into_iter()
+            .map(|r| form_to_task(r.form).expect("valid row converts"))
+            .collect();
+
+        // 3. Batch insert into a temp DB (one transaction).
+        let mut p = std::env::temp_dir();
+        p.push(format!("nudge-app-import-e2e-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let mut store = Store::open_at(p.clone()).unwrap();
+        let ids = store.insert_batch(&tasks).unwrap();
+        assert_eq!(ids.len(), 2);
+
+        let stored = store.list().unwrap();
+        assert_eq!(stored.len(), 2);
+        let ship = stored.iter().find(|t| t.title == "Ship report").unwrap();
+        assert_eq!(ship.minutes, Some(14 * 60 + 30)); // derived from deadline time
+        assert_eq!(ship.estimate_minutes, Some(90));
+        assert_eq!(ship.task_source, TriggerSource::Manual); // forced downstream
+        let errand = stored.iter().find(|t| t.title == "Errand").unwrap();
+        assert!(errand.deadline.is_some());
+        assert_eq!(errand.minutes, None); // date-only deadline
+
+        drop(store);
+        let _ = std::fs::remove_file(&p);
+    }
+}

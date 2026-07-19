@@ -2,34 +2,14 @@
 <!-- Boundary: forward-looking task queue only. Completed-step detail lives in HISTORY.md.
      Repo is live at github.com/harris11ax/nudge-bot-app — see "GitHub Workflow" below. -->
 
-Last completed: session 61 — Step 7 P3 (CSV import filter screen `CsvImport.svelte` + Import tab).
-Next open: **step 9** (UI-PLAN §7 rework — planned, [UI-PLAN.md](UI-PLAN.md) §7), **step 7** (CSV bulk task
-import — planned, [PLAN-csv-import.md](PLAN-csv-import.md)) and **step 8** (fix Gmail scan 403). Step 6
-(nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
+Last completed: session 62 — Step 7 P4 (CSV import tests: `insert_batch` atomicity/ordering, empty no-op, end-to-end mixed valid/broken pipeline). Step 7 **fully complete**.
+Next open: **step 9** (UI-PLAN §7 rework — planned, [UI-PLAN.md](UI-PLAN.md) §7), **step 8** (fix Gmail scan 403),
+and **step 11** (Bulk Upload: hierarchy + spreadsheet ingest — planned, [PLAN-bulk-upload.md](PLAN-bulk-upload.md)).
+Step 6 (nudge-draft LLM pass) is PARKED. Full history: [HISTORY.md](HISTORY.md).
 
 ## Open steps
 - [ ] **9 — UI-PLAN §7 rework: Tasks nomenclature, Task↔Event binding, Settings/Calendar, Tools launch** | **Opus** | ~2–3d | **PLANNED → [UI-PLAN.md](UI-PLAN.md) §7**
   Requested 2026-07-18. Four areas: (a) **§7.1** rename Trigger→Task + start time→**Deadline** app-wide, reorder Tasks tab (Quick Add top / Suggested bottom), `trigger_source`→`task_source`; (b) **§7.2** bidirectional Task↔Calendar Event binding (auto-tie on create, default event = Deadline→Deadline+1h, edit propagation to GCal, Task-bound events excluded from Suggested, calendar event-click menu Add Task/Edit Event/Delete Event); (c) **§7.3** dedicated Settings → Calendar tab; (d) **§7.4** relabel/hide AW "Unknown (system/lock screen)" bucket, per-website resolution inside browsers, Launch-tool-from-task (web URL + Windows exe). Phase per session. **Resolved (session 58):** "Deadline" is a **field-semantics change** — `deadline` (hard unix deadline, already in the model + the sole key of `display_list`) becomes the primary user-facing task time; the fire `minutes` derives from it (same pattern as step 4 + CSV import). **§7.1 backend DONE (session 58):** `trigger_source`→`task_source` renamed across DB column (both crates, byte-identical CREATE), DTO/JSON API, and `Task` field; back-compat `RENAME COLUMN` migration in both crates + a legacy-DB migration test; internal `TriggerSource` type kept. Workspace 41 + app 58 tests green. **§7.1 DONE (session 60):** Svelte relabel — tab "Triggers"→"Tasks" (App.svelte label; internal id kept), Planner "New task", Tasks page header "Tasks" / "Full task" / "Create task"; Deadline-first binding — dropped standalone Time-of-day field, `minutes` now derives from Deadline's time-of-day (`minutesFromDeadline`); tab reorder — Quick Add + Full task on top, Suggested moved to bottom. `npm run build` green. **§7.1 fully complete; next phase: §7.2** (Task↔Event binding).
-
-- [ ] **7 — CSV bulk task import** | **Sonnet** | ~1–1.5d | **PLANNED → [PLAN-csv-import.md](PLAN-csv-import.md)**
-  Bulk-add tasks from a `.csv`. Flow: user dumps a text task list → asks Claude/Gemini to shape it into
-  the canonical CSV → uploads it → an intermediate **filter screen** flags each row import-ready vs. broken
-  (required fields present/parseable), user edits/toggles → Import writes all included rows to `tasks`.
-  Reuses the existing ingestion contract (row → `NewTaskForm` → `Task` → `Db::insert`, same path as
-  `add_task`); mirrors the `suggested_triggers` staging→accept pattern. App-process only — **no svc change,
-  no polling, no in-app LLM/network** (the LLM shaping happens outside nudge-bot). Canonical header:
-  `title,description,deadline,time_of_day,recur,task_type,estimate_minutes,mode`. Must ship a
-  **"Download blank template.csv"** button (header-only file to hand off to the LLM) and a "Copy LLM prompt"
-  button. Phases (one per session): **P1 ✅ DONE (session 58)** pure `csv_import.rs` parser + validation (11 unit tests green, no I/O);
-  **P2 ✅ DONE (session 59)** `Store::insert_batch` (single sqlite transaction), `ImportRowDto`, tauri cmds
-  `validate_csv_import`/`import_tasks` (server-side re-validation via shared `form_to_task`, ONE `signal_reload`
-  for the whole batch) + `generate_handler!` registration. 58 app-lib tests green; **P3 ✅ DONE (session 61)** `CsvImport.svelte`
-  filter screen — CSV load via webview `FileReader` + paste box (no tauri dialog/fs plugin), per-row `validate_csv_import`,
-  inline-editable cells that re-validate the single row on edit, include toggles (auto-off for invalid), status pills + inline
-  error text, batch import via new `importTaskBatch` store helper; `validateCsvImport`/`importTasks` api.js wrappers; "Import"
-  tab added to App.svelte left rail (icon ⤓, between Tasks and Settings); Download-template + Copy-LLM-prompt buttons.
-  `npm run build` green, `cargo check` clean; **P4 (next)** unit tests + live drive a mixed valid/broken CSV end-to-end. Out of scope:
-  `.xlsx` ingestion, column-remap wizard.
 
 - [ ] **8 — Fix "Scan Gmail + Calendar" 403** | **Sonnet** | ~0.5–2h
   Reported 2026-07-17: `messages.list ... status code 403` on the inbox scan. Likely a **stale OAuth scope** —
@@ -39,6 +19,21 @@ import — planned, [PLAN-csv-import.md](PLAN-csv-import.md)) and **step 8** (fi
   Google** (`google_connect` re-consents with `prompt=consent`) and re-scan; (3) if still 403, verify the
   **Gmail API is enabled** in the GCP project (console setting, not code). Add a UI hint: on a Gmail 403,
   surface "Reconnect Google to grant mail access" instead of the raw error. Calendar half is unaffected.
+
+- [ ] **11 — Bulk Upload: task hierarchy + spreadsheet ingest** | **PLANNED → [PLAN-bulk-upload.md](PLAN-bulk-upload.md)**
+  Requested 2026-07-19. Extends step 7 (CSV import). Adds a Project Groups → Projects → Tasks hierarchy
+  (`tasks.project_id` nullable FK, one task ↔ one project), `.xlsx` ingest, a rename Import→**Bulk Upload**
+  reached from the Tasks page, and title/deadline **dedup with an ignored-rows report block** ahead of an
+  editable confirm table. Spreadsheet gains two leading columns `project_group,project` that resolve
+  (exact NOCASE match-or-create) per row. Dedup rule: a row is new iff **both** title AND deadline are
+  unused; if **either** matches an existing task it's reported ignored. App-process only — no svc change,
+  no polling, no in-app LLM/network. Phases (one per session, each references the plan):
+  - [ ] **11a — schema + hierarchy resolver** | **Sonnet** | ~0.5d | PLAN §7 P1 — new `project_groups`/`projects` tables + tolerant `project_id` ALTER; `resolve_group_project` match-or-create; temp-DB unit tests.
+  - [ ] **11b — parser + dedup** | **Sonnet** | ~0.5d | PLAN §7 P2 — extend `parse_import` to the 10-col header; pure `dedup_rows` over an injected existing-set; unit matrix (title/deadline/both-empty/intra-sheet/blank-group).
+  - [ ] **11c — `.xlsx` reader** | **Sonnet** | ~0.5d | PLAN §7 P3 — `calamine` behind `read_spreadsheet(bytes,ext)` feeding `parse_import`; fixture `.xlsx` test; CSV path untouched.
+  - [ ] **11d — tauri commands** | **Sonnet** | ~0.5d | PLAN §7 P4 — `validate_bulk_upload` + `confirm_bulk_upload` (one transaction: resolve hierarchy + `insert_batch` + single reload; server-side re-validate/re-dedup); `generate_handler!`.
+  - [ ] **11e — `BulkUpload.svelte` + Tasks-page entry** | **Opus** | ~1–1.5d | PLAN §7 P5 — rename Import→Bulk Upload under Tasks page; **both** tables editable (valid + ignored report block) with bidirectional rule-driven row movement (fix a dup's deadline → jumps to valid; reintroduce a collision → drops to report); Group/Project columns; Confirm; api.js wrappers + store batch helper. *(Opus: cross-cutting UI/state + in-table hierarchy editing + two-way row migration.)*
+  - [ ] **11f — verify** | **Sonnet** | ~0.5d | PLAN §7 P6 — unit matrices green; live-drive a mixed `.xlsx` (two groups + title dup + deadline dup + blank-group row) end-to-end.
 
 - [ ] **6 — nudge-draft LLM title/time pass** | **Opus** | ~1d | **PARKED (2026-07-17)**
   LLM pass to draft task titles/times from Gmail/GCal candidates. Needs the `nudge-draft` binary crate split
@@ -55,6 +50,7 @@ import — planned, [PLAN-csv-import.md](PLAN-csv-import.md)) and **step 8** (fi
 - [x] **3** — Renderers consume `meta.style_bands` (session 55).
 - [x] **4** — Deadline-only tasks + undated-once suggestions (session 56).
 - [x] **5** — Custom pause duration via `[escalation] custom_pause_secs` (session 57).
+- [x] **7** — CSV bulk task import: P1 parser (58) · P2 `insert_batch`+cmds (59) · P3 `CsvImport.svelte` filter screen (61) · P4 batch/e2e tests, 61 app-lib tests green (session 62).
 
 ## Session model: Sonnet (default) | Opus gate on planning/complex design | Haiku for trivial tasks
 - Read NEXTSTEPS.md at start. Scan for incomplete steps:

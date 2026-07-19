@@ -1,0 +1,11 @@
+project_group,project,title,description,deadline,time_of_day,recur,task_type,estimate_minutes,mode
+Company Work,Q3 Launch,Send revised budget to Dana,"Dana asked for the updated Q3 figures before sign-off",2026-07-24,17:00,once,email,20,off_task
+Company Work,Q3 Launch,Draft launch announcement,"Marketing wants a first draft to review next week",2026-07-27,,once,writing,90,on_task
+Company Work,Q3 Launch,Book launch retrospective room,Implied follow-up after the launch date is set,2026-07-30,,once,admin,10,off_task
+Research Group,Grant Proposal,Write methods section,"Priya suggested I own the methods write-up",2026-08-03,,once,writing,180,on_task
+Research Group,Grant Proposal,Collect co-author CVs,"Need current CVs from all three co-authors for the appendix",2026-07-28,12:00,once,email,30,off_task
+Research Group,Weekly Sync,Prep standup slides,Recurring prep for the Monday/Wednesday lab standups,,09:00,"mon,wed",meeting,25,off_task
+Individual Courses,Homework,Finish problem set 4,"Due before Thursday's lecture per the syllabus",2026-07-23,23:59,once,homework,120,on_task
+Individual Courses,Homework,Email professor about extension,"Implied: mentioned needing more time on the essay",2026-07-22,,once,email,15,off_task
+Independent Research,Reading Backlog,Read transformer scaling paper,Suggested during the meeting as relevant background,,,once,research,60,on_task
+Independent Research,Side Project,Set up repo CI,No hard deadline mentioned; flagged as a nice-to-have,,,once,admin,45,on_task

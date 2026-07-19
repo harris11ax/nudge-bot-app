@@ -838,6 +838,61 @@ mod tests {
         drop(store);
         let _ = std::fs::remove_file(&path);
     }
+
+    // CSV bulk import (P2): a batch lands atomically in one transaction, returns
+    // rowids in input order, and every field round-trips through `list()`.
+    #[test]
+    fn insert_batch_lands_all_rows_in_order() {
+        let (mut store, path) = temp_store("batch");
+        let mk = |title: &str, deadline: Option<i64>, mins: Option<u32>| Task {
+            id: None,
+            title: title.into(),
+            desc: format!("{title} desc"),
+            deadline,
+            task_type: "work".into(),
+            minutes: mins,
+            recur: Recur::Once,
+            mode_override: Some(Mode::OffTask),
+            task_source: TriggerSource::Manual,
+            gcal_event_id: None,
+            estimate_minutes: Some(45),
+            logged_minutes: 0,
+        };
+        let batch = vec![
+            mk("alpha", Some(1000), Some(600)),
+            mk("beta", None, None),
+            mk("gamma", Some(2000), Some(90)),
+        ];
+        let ids = store.insert_batch(&batch).unwrap();
+        assert_eq!(ids.len(), 3);
+        // Rowids are assigned in input order and strictly increasing.
+        assert!(ids[0] < ids[1] && ids[1] < ids[2], "ids: {ids:?}");
+
+        let all = store.list().unwrap();
+        assert_eq!(all.len(), 3);
+        let titles: Vec<&str> = all.iter().map(|t| t.title.as_str()).collect();
+        assert!(titles.contains(&"alpha") && titles.contains(&"beta") && titles.contains(&"gamma"));
+        let beta = all.iter().find(|t| t.title == "beta").unwrap();
+        assert_eq!(beta.deadline, None);
+        assert_eq!(beta.minutes, None);
+        assert_eq!(beta.estimate_minutes, Some(45));
+        assert_eq!(beta.mode_override, Some(Mode::OffTask));
+        assert_eq!(beta.logged_minutes, 0); // svc-owned, never written by batch
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // An empty batch is a no-op that commits cleanly and touches no rows.
+    #[test]
+    fn insert_batch_empty_is_noop() {
+        let (mut store, path) = temp_store("batch-empty");
+        let ids = store.insert_batch(&[]).unwrap();
+        assert!(ids.is_empty());
+        assert_eq!(store.list().unwrap().len(), 0);
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 /// Persisted `mode_override` label → [`Mode`]; unknown/NULL → `None` (classify at
