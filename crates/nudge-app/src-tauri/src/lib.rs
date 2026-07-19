@@ -990,4 +990,122 @@ mod import_e2e_tests {
         drop(store);
         let _ = std::fs::remove_file(&p);
     }
+
+    // End-to-end Bulk Upload (PLAN-bulk-upload.md §7 P6): a mixed .xlsx across two
+    // groups + one blank-group row + a deliberate title dup + a deliberate deadline
+    // dup drives the exact bodies of validate_bulk_upload then confirm_bulk_upload
+    // (read_spreadsheet → parse_import → dedup_rows; then form_to_task → try_reserve
+    // → insert_bulk), asserting the report partition AND the DB end-state
+    // (task rows, resolved project_ids, auto-created hierarchy, one unfiled task).
+    #[test]
+    fn mixed_xlsx_bulk_upload_end_to_end() {
+        use rust_xlsxwriter::Workbook;
+
+        // --- Build the mixed .xlsx blob (the file a user would upload). ---------
+        let header = [
+            "project_group", "project", "title", "description", "deadline",
+            "time_of_day", "recur", "task_type", "estimate_minutes", "mode",
+        ];
+        // (group, project, title, deadline) — the fields that decide the outcome.
+        let data: [(&str, &str, &str, &str); 6] = [
+            ("Company Work", "Q3 Launch", "Send revised budget", "2026-07-24"), // new
+            ("Company Work", "Q3 Launch", "Draft launch announcement", "2026-07-27"), // new
+            ("Research Group", "Grant Proposal", "Write methods section", "2026-08-03"), // new
+            ("", "", "Read transformer scaling paper", ""), // new, unfiled, empty deadline
+            ("Company Work", "Q3 Launch", "send revised budget", "2026-07-25"), // dup TITLE (NOCASE) of row1
+            ("Research Group", "Grant Proposal", "Collect co-author CVs", "2026-07-24"), // dup DEADLINE of row1
+        ];
+        let mut wb = Workbook::new();
+        let ws = wb.add_worksheet();
+        for (c, h) in header.iter().enumerate() {
+            ws.write_string(0, c as u16, *h).unwrap();
+        }
+        for (r, (g, p, t, d)) in data.iter().enumerate() {
+            let row = (r + 1) as u32;
+            ws.write_string(row, 0, *g).unwrap();
+            ws.write_string(row, 1, *p).unwrap();
+            ws.write_string(row, 2, *t).unwrap();
+            ws.write_string(row, 4, *d).unwrap();
+        }
+        let bytes = wb.save_to_buffer().unwrap();
+
+        // --- A fresh temp DB standing in for the machine store. ----------------
+        let mut path = std::env::temp_dir();
+        path.push(format!("nudge-app-bulk-e2e-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = Store::open_at(path.clone()).unwrap();
+
+        // === validate_bulk_upload body =========================================
+        let text = csv_import::read_spreadsheet(&bytes, "xlsx").unwrap();
+        let rows = csv_import::parse_import(&text);
+        assert_eq!(rows.len(), 6, "six data rows parsed");
+        let mut existing = existing_keys(&store).unwrap(); // empty DB snapshot
+        let outcome = csv_import::dedup_rows(rows, &mut existing);
+
+        // Report partition: 4 new-unique, 2 ignored (one title, one deadline).
+        assert_eq!(outcome.new_rows.len(), 4, "rows 1-4 are new-unique");
+        assert_eq!(outcome.ignored.len(), 2, "rows 5-6 are duplicates");
+        let title_dup = outcome
+            .ignored
+            .iter()
+            .find(|ig| ig.row.form.title.eq_ignore_ascii_case("send revised budget"))
+            .expect("title-dup row reported");
+        assert!(title_dup.reason.contains("title"), "reason: {}", title_dup.reason);
+        let dl_dup = outcome
+            .ignored
+            .iter()
+            .find(|ig| ig.row.form.title == "Collect co-author CVs")
+            .expect("deadline-dup row reported");
+        assert!(dl_dup.reason.contains("deadline"), "reason: {}", dl_dup.reason);
+
+        // === confirm_bulk_upload body (only the new_rows, as the UI would) ======
+        let mut confirm = existing_keys(&store).unwrap(); // fresh live snapshot
+        let mut items: Vec<db::BulkInsert> = Vec::new();
+        for row in outcome.new_rows {
+            let group = row.project_group.clone();
+            let project = row.project.clone();
+            let task = form_to_task(row.form).expect("new row converts");
+            if !confirm.try_reserve(&task.title, task.deadline) {
+                continue; // server-side re-dedup (none expected here)
+            }
+            items.push(db::BulkInsert { task, group, project });
+        }
+        assert_eq!(items.len(), 4, "all 4 new rows survive re-dedup");
+        let ids = store.insert_bulk(&items).unwrap();
+        assert_eq!(ids.len(), 4, "4 tasks written in one transaction");
+
+        // === DB end-state (reopen the file to read project_id + hierarchy) =====
+        let stored = store.list().unwrap();
+        assert_eq!(stored.len(), 4);
+        drop(store);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let groups: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_groups", [], |r| r.get(0))
+            .unwrap();
+        let projects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((groups, projects), (2, 2), "two groups + two projects auto-created");
+
+        let pid = |title: &str| -> Option<i64> {
+            conn.query_row(
+                "SELECT project_id FROM tasks WHERE title = ?1",
+                [title],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        // The three filed tasks each carry a non-NULL project_id; the two under the
+        // same group+project share it; the unfiled row is NULL.
+        let budget = pid("Send revised budget");
+        let announce = pid("Draft launch announcement");
+        let methods = pid("Write methods section");
+        assert!(budget.is_some() && announce.is_some() && methods.is_some());
+        assert_eq!(budget, announce, "same Company Work → Q3 Launch project");
+        assert_ne!(budget, methods, "different group/project → different id");
+        assert_eq!(pid("Read transformer scaling paper"), None, "blank group ⇒ unfiled");
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
 }

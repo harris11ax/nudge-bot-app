@@ -473,3 +473,26 @@ it raises still uses the existing kindless prompt; the interactive Yes/No + task
   in-page sub-view (with a "← Tasks" back button). `CsvImport.svelte` left on disk, now unreferenced.
 - `npm run build` green (132 modules, no errors). Frontend-only; no svc/backend change. Not committed.
   Next: 11f verify — unit matrices + live-drive a mixed `.xlsx` end-to-end.
+
+## Session 69 (2026-07-19) — Step 11f / PLAN-bulk-upload P6: verify — **Step 11 (Bulk Upload) complete**
+- Found the on-disk release exe stale (Jul 18, pre-`BulkUpload.svelte`). Rebuilt: `vite build` +
+  `cargo build --release` from `crates/nudge-app/src-tauri` (exe 03:10, 13.2 MB).
+- **Headless end-to-end drive of the ingest pipeline** (below the Tauri IPC boundary — the
+  `validate_bulk_upload`/`confirm_bulk_upload` commands at `lib.rs:228`/`:269` are thin wrappers over
+  `read_spreadsheet → parse_import → dedup_rows` then `form_to_task → try_reserve → insert_bulk`).
+  Added permanent test `import_e2e_tests::mixed_xlsx_bulk_upload_end_to_end`: builds a mixed `.xlsx`
+  (two groups + blank-group row + title dup (NOCASE) + deadline dup), runs both command bodies against
+  a temp `Store`, asserts the **report partition (4 new / 2 ignored, title+deadline reasons checked
+  individually)** and, by reopening the DB file, the **end-state**: 2 groups + 2 projects auto-created,
+  same group+project rows share one `project_id`, blank-group row `project_id` NULL, 4 tasks in one tx.
+- Also drove the **actual openpyxl-generated fixture** (`scratchpad/mixed_bulk.xlsx`) through
+  `read_spreadsheet` (real calamine path) → 4 new / 2 ignored, reasons `title "send revised budget"
+  already exists` + `deadline 1784865600 already exists` — proves calamine reads a third-party `.xlsx`
+  (shared strings/styles), not just `rust_xlsxwriter` output. (Temporary env-gated test, since removed.)
+- **81 app-lib tests green** (80 prior + the new xlsx e2e).
+- **GUI layer NOT driven** — computer-use approval is unavailable in scheduled runs (`request_access`
+  returned "can't be approved during a scheduled run"). Launching the app from Claude's MSIX-redirected
+  shell also virtualizes the DB path, so the live `%LOCALAPPDATA%\nudge-bot\sessions.db` was untouched
+  (still pre-§7.1 `trigger_source`, no `project_id`). The Svelte↔Tauri wiring (arraybuffer→invoke,
+  two-table render, §5 bidirectional row movement) is deferred to a human-present session → NEXTSTEPS
+  step 1. Nothing committed.
