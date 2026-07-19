@@ -12,6 +12,14 @@ export const addQuickadd = (line) => invoke("add_quickadd", { line });
 /** Insert via the structured fallback form. */
 export const addTask = (form) => invoke("add_task", { form });
 
+/**
+ * Update an existing task by id (§7.2). Re-validates the form server-side,
+ * rewrites only the user-editable fields (origin / event binding / hierarchy /
+ * accrual preserved), best-effort propagates title+Deadline onto the bound
+ * Calendar Event, and returns the updated TaskDto.
+ */
+export const updateTask = (id, form) => invoke("update_task", { id, form });
+
 /** Delete a task by id. */
 export const deleteTask = (id) => invoke("delete_task", { id });
 

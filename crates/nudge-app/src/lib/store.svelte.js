@@ -5,6 +5,7 @@ import {
   listTasks,
   addQuickadd,
   addTask,
+  updateTask,
   deleteTask,
   listSuggestedTriggers,
   acceptSuggestedTrigger,
@@ -55,6 +56,14 @@ export async function quickAdd(line) {
  *  callers can attach child rows (e.g. §6.2 task_tools). */
 export async function createTask(form) {
   const task = await addTask(form);
+  await refresh();
+  return task;
+}
+
+/** Update an existing task via the structured form (§7.2); returns the fresh
+ *  TaskDto (with the possibly-refreshed event binding) and reloads the list. */
+export async function saveTask(id, form) {
+  const task = await updateTask(id, form);
   await refresh();
   return task;
 }
