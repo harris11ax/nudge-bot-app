@@ -250,7 +250,9 @@ code { background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
   color: var(--fg);
   border-left: 3px solid var(--evt-color, var(--accent));
 }
-.cal-item.deadline {
+/* Task-backed events (§7.2): same deadline color the old ⏱ chip used, so a
+   task reads as a task on the grid while staying a clickable event. */
+.cal-item.event.task {
   background: color-mix(in srgb, var(--missed) 16%, transparent);
   color: var(--missed);
   border-left: 3px solid var(--missed);

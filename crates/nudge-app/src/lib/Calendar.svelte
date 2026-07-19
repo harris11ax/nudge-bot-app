@@ -124,14 +124,12 @@
     );
   }
 
-  // Task deadlines landing on a given day.
-  function deadlinesOn(d) {
-    const dayStart = d.getTime();
-    const dayEnd = dayStart + DAY_MS;
-    return store.tasks.filter(
-      (t) => t.deadline != null && t.deadline * 1000 >= dayStart && t.deadline * 1000 < dayEnd
-    );
-  }
+  // Event ids bound to a task (§7.2). Their events render with the deadline
+  // color to mark them as task-backed — replacing the old unclickable ⏱ chip,
+  // so the clickable event itself now carries the task on the grid.
+  const taskEventIds = $derived(
+    new Set(store.tasks.filter((t) => t.gcal_event_id).map((t) => t.gcal_event_id))
+  );
 
   function calColor(calendarId) {
     return calendars.find((c) => c.gcal_id === calendarId)?.bg_color || "";
@@ -378,14 +376,10 @@
     >
       <span class="cal-daynum">{d.getDate()}</span>
       <div class="cal-items">
-        {#each deadlinesOn(d) as t (t.id)}
-          <!-- svelte-ignore a11y_click_events_have_key_events -->
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div class="cal-item deadline" title={t.title} onclick={(ev) => ev.stopPropagation()}>⏱ {t.title}</div>
-        {/each}
         {#each eventsOn(d) as e (e.event_id)}
           <div
             class="cal-item event"
+            class:task={taskEventIds.has(e.event_id)}
             style={calColor(e.calendar_id) ? `--evt-color:${calColor(e.calendar_id)}` : ""}
             title={`${e.summary} (click to edit)`}
             role="button"
