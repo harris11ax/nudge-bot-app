@@ -15,6 +15,7 @@
     createEvent,
     updateEvent,
     deleteEvent,
+    addTaskForEvent,
   } from "./api.js";
 
   const DAY_MS = 24 * 3600 * 1000;
@@ -269,6 +270,61 @@
   // §7.2 event-click menu — Delete Event. Pushes the delete to Google, drops the
   // cached row, and unbinds any task that referenced it; refreshes the grid and
   // the task store (a bound task's Calendar-event field flips to "—").
+  // §7.2 event-click menu — Add Task. Opens a small form pre-filled from the
+  // event (title + Deadline = event start); Create binds a new task to this event.
+  let taskDialog = $state(/** @type {null | object} */ (null));
+  let taskErr = $state("");
+  let taskSaving = $state(false);
+
+  function openAddTask(e) {
+    const start = new Date(e.event_id ? e.start_unix * 1000 : Date.now());
+    taskDialog = {
+      eventId: e.event_id,
+      title: e.summary,
+      date: e.all_day ? isoDateUtc(e.start_unix) : isoDateLocal(start),
+      time: e.all_day ? "09:00" : hhmmLocal(start),
+    };
+    taskErr = "";
+    dialog = null; // close the edit dialog behind it
+  }
+
+  function closeTaskDialog() {
+    taskDialog = null;
+  }
+
+  async function submitAddTask(ev) {
+    ev.preventDefault();
+    if (!taskDialog.title.trim()) {
+      taskErr = "Title is required.";
+      return;
+    }
+    // Deadline is a unix second at the chosen date + time-of-day (local).
+    const deadline = Math.floor(
+      new Date(`${taskDialog.date}T${taskDialog.time}`).getTime() / 1000
+    );
+    const form = {
+      title: taskDialog.title.trim(),
+      desc: "",
+      deadline,
+      task_type: "",
+      minutes: null,
+      recur: "once",
+      mode_override: null,
+      estimate_minutes: null,
+    };
+    taskSaving = true;
+    taskErr = "";
+    try {
+      await addTaskForEvent(taskDialog.eventId, form);
+      taskDialog = null;
+      await refreshTasks();
+    } catch (err) {
+      taskErr = String(err);
+    } finally {
+      taskSaving = false;
+    }
+  }
+
   async function deleteDialogEvent() {
     if (!dialog || dialog.mode !== "edit") return;
     dialogSaving = true;
@@ -391,6 +447,9 @@
         {#if dialogErr}<p class="error wide">{dialogErr}</p>{/if}
         <div class="wide dialog-actions">
           {#if dialog.mode === "edit"}
+            <button type="button" onclick={() => openAddTask(dialog && events.find((e) => e.event_id === dialog.eventId))} disabled={dialogSaving}>
+              Add Task
+            </button>
             <button type="button" class="danger" onclick={deleteDialogEvent} disabled={dialogSaving}>
               Delete
             </button>
@@ -398,6 +457,30 @@
           <button type="button" onclick={closeDialog}>Cancel</button>
           <button class="primary" type="submit" disabled={dialogSaving}>
             {dialogSaving ? "Saving…" : dialog.mode === "create" ? "Create" : "Save"}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+{/if}
+
+{#if taskDialog}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="overlay" onclick={closeTaskDialog} onkeydown={(ev) => ev.key === "Escape" && closeTaskDialog()}>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="dialog card" onclick={(ev) => ev.stopPropagation()}>
+      <h2>Add task from event</h2>
+      <form onsubmit={submitAddTask} class="grid">
+        <label class="wide">Title<input bind:value={taskDialog.title} required /></label>
+        <label>Deadline<input type="date" bind:value={taskDialog.date} required /></label>
+        <label>Time<input type="time" bind:value={taskDialog.time} required /></label>
+        {#if taskErr}<p class="error wide">{taskErr}</p>{/if}
+        <div class="wide dialog-actions">
+          <button type="button" onclick={closeTaskDialog}>Cancel</button>
+          <button class="primary" type="submit" disabled={taskSaving}>
+            {taskSaving ? "Saving…" : "Create task"}
           </button>
         </div>
       </form>

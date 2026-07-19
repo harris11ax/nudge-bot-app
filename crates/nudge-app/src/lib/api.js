@@ -23,6 +23,14 @@ export const updateTask = (id, form) => invoke("update_task", { id, form });
 /** Delete a task by id. */
 export const deleteTask = (id) => invoke("delete_task", { id });
 
+/**
+ * §7.2 event-click Add Task: create a task from an existing Calendar Event and
+ * bind it to that event (no new event is auto-tied). `form` is a NewTaskForm
+ * pre-filled from the event; returns the created TaskDto.
+ */
+export const addTaskForEvent = (eventId, form) =>
+  invoke("add_task_for_event", { eventId, form });
+
 /** One-shot pull of a cold-start `--task <id>` (9d-ii click-through), or null. */
 export const getPendingTask = () => invoke("get_pending_task");
 

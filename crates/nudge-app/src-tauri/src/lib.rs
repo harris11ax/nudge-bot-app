@@ -158,6 +158,23 @@ fn add_task(form: NewTaskForm) -> Result<TaskDto, String> {
     insert_and_reload(form_to_task(form)?)
 }
 
+/// §7.2 event-click **Add Task**: create a task from an existing Calendar Event
+/// and bind it to that event. Unlike [`add_task`], this does NOT auto-tie a fresh
+/// event — the task adopts the pre-existing `event_id` as its binding, so
+/// `insert_and_reload`'s [`try_autotie`] is skipped (the binding is already set).
+/// The event is left untouched (no propagation); the UI pre-fills the form from
+/// the event's fields and the user may complete any missing ones before saving.
+#[tauri::command]
+fn add_task_for_event(event_id: String, form: NewTaskForm) -> Result<TaskDto, String> {
+    let event_id = event_id.trim();
+    if event_id.is_empty() {
+        return Err("event id is empty".into());
+    }
+    let mut task = form_to_task(form)?;
+    task.gcal_event_id = Some(event_id.to_string());
+    insert_and_reload(task)
+}
+
 /// Parse a CSV blob into per-row verdicts for the filter screen (P2). Pure
 /// validation — nothing is written; the UI decides which rows to import.
 #[tauri::command]
@@ -1080,6 +1097,7 @@ pub fn run() {
             list_tasks,
             add_quickadd,
             add_task,
+            add_task_for_event,
             update_task,
             validate_csv_import,
             import_tasks,
@@ -1292,6 +1310,42 @@ mod import_e2e_tests {
         assert_eq!(pid("Read transformer scaling paper"), None, "blank group ⇒ unfiled");
 
         drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // §7.2 event-click Add Task: a task created from an existing event adopts that
+    // event's id as its binding (form_to_task + preset gcal_event_id), and the
+    // binding survives the insert (insert_and_reload would NOT auto-tie a second
+    // event since gcal_event_id is already Some). Mirrors add_task_for_event's core.
+    #[test]
+    fn add_task_for_event_binds_to_existing_event() {
+        let form = NewTaskForm {
+            title: "Prep for standup".into(),
+            desc: String::new(),
+            deadline: Some(1_784_000_000),
+            task_type: String::new(),
+            minutes: None,
+            recur: "once".into(),
+            mode_override: None,
+            estimate_minutes: None,
+        };
+        let mut task = form_to_task(form).unwrap();
+        task.gcal_event_id = Some("evt-existing-99".into());
+        // insert_and_reload only auto-ties when the binding is None — already Some here.
+        assert!(task.gcal_event_id.is_some());
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("nudge-app-addforevent-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open_at(path.clone()).unwrap();
+        let id = store.insert(&task).unwrap();
+
+        let stored = store.get(id).unwrap().unwrap();
+        assert_eq!(stored.gcal_event_id.as_deref(), Some("evt-existing-99"));
+        assert_eq!(stored.title, "Prep for standup");
+        assert_eq!(stored.task_source, TriggerSource::Manual);
+
+        drop(store);
         let _ = std::fs::remove_file(&path);
     }
 }
