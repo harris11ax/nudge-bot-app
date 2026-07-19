@@ -10,6 +10,7 @@ import {
   acceptSuggestedTrigger,
   dismissSuggestedTrigger,
   runConnectors,
+  importTasks,
 } from "./api.js";
 
 export const store = $state({
@@ -82,6 +83,13 @@ export async function dismissSuggestion(id) {
  * Run the Gmail/GCal connectors (10e), then reload the inbox to show whatever
  * was deposited. Returns the run summary so the caller can toast counts.
  */
+/** Import an approved batch of rows in one transaction, then reload the task list. */
+export async function importTaskBatch(rows) {
+  const count = await importTasks(rows);
+  await refresh();
+  return count;
+}
+
 export async function scanConnectors() {
   const summary = await runConnectors();
   await refreshSuggestedTriggers();

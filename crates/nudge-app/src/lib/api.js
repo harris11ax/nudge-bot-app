@@ -18,6 +18,12 @@ export const deleteTask = (id) => invoke("delete_task", { id });
 /** One-shot pull of a cold-start `--task <id>` (9d-ii click-through), or null. */
 export const getPendingTask = () => invoke("get_pending_task");
 
+/** Parse a CSV blob into per-row verdicts for the import filter screen (P2). Pure — writes nothing. */
+export const validateCsvImport = (text) => invoke("validate_csv_import", { text });
+
+/** Import a batch of client-approved rows in ONE transaction; returns the count written. */
+export const importTasks = (rows) => invoke("import_tasks", { rows });
+
 /** @returns {Promise<"not_configured"|"disconnected"|"connected">} Google OAuth state. */
 export const googleStatus = () => invoke("google_status");
 
