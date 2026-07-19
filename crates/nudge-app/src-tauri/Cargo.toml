@@ -26,6 +26,16 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Google OAuth token exchange/refresh + (10b+) Calendar/Gmail REST calls.
 # Blocking, no async — same idiom as nudge-draft's Anthropic client.
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+# Local time-of-day extraction from a deadline unix when an accepted suggestion
+# becomes a one-shot (`Recur::Once`) task — the svc schedules by local
+# minutes-since-midnight, so the app derives that here (sole writer of `tasks`).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# CSV bulk-task import (step 7): split + quoted-field handling for the import
+# parser. Pure parse only — no network, no new polling; app-process one-shot.
+csv = "1"
+# `.xlsx` bulk-upload ingest (step 11c): pure-Rust spreadsheet reader, no runtime
+# or network. First worksheet → CSV text → the same `parse_import` path as CSV.
+calamine = "0.26"
 
 # Win32 named-event signal so the resident svc live-reloads after a write, matching
 # nudge-ctl's `Local\nudge-bot-reload` path (no new IPC surface). Also: WM_COPYDATA
@@ -40,8 +50,15 @@ windows = { version = "0.61", features = [
     "Win32_System_Threading",
     "Win32_System_DataExchange",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_Security_Cryptography",
 ] }
+
+[dev-dependencies]
+# Generate a tiny in-memory `.xlsx` fixture for the bulk-upload reader test
+# (round-trips through calamine) so no binary blob lives in the repo.
+rust_xlsxwriter = "0.79"
 
 [features]
 # Default Tauri custom-protocol for release builds (set by `tauri build`).

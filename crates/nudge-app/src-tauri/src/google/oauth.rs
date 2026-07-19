@@ -95,13 +95,18 @@ fn build_auth_url(
     )
 }
 
-/// Open `url` in the user's default browser. `cmd /C start` is the standard
-/// dependency-free way to do this on Windows (avoids pulling in the `open`
-/// crate for one call).
+/// Open `url` in the user's default browser via `rundll32 url.dll,
+/// FileProtocolHandler` (dependency-free, avoids pulling in the `open` crate
+/// for one call). NOT `cmd /C start`: our auth URL contains unescaped `&`
+/// query separators and no spaces, so `Command`'s Windows argument quoting
+/// (which only quotes for whitespace/quotes, per `CommandLineToArgvW` rules)
+/// leaves it unquoted — cmd.exe then re-parses its own command line and
+/// splits on every `&`, truncating the URL after the first query param.
+/// `rundll32` isn't a shell, so it takes the URL as a single opaque argument.
 #[cfg(windows)]
 fn open_browser(url: &str) -> Result<(), String> {
-    std::process::Command::new("cmd")
-        .args(["/C", "start", "", url])
+    std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", url])
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("open browser: {e}"))

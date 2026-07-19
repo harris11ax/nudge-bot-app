@@ -25,12 +25,25 @@ const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 /// the escalation ladder room to run before `WindowEnd` drops the prompt.
 const TASK_WINDOW_MINUTES: u32 = 30;
 
+/// Fallback start time-of-day (minutes since local midnight, 09:00) for a task
+/// with no explicit `minutes` cue — a deadline-only task (Weekly with no
+/// time-of-day) or a `Recur::Once` task whose deadline instant is date-only.
+/// Gives such tasks a real window instead of silently never firing (step 4).
+const DEFAULT_TASK_MINUTES: u32 = 9 * 60;
+
 /// A nudge window normalized for scheduling, independent of its source (a rules
 /// `[[nudge]]` block or a recurring `tasks` row). `active[i]` marks weekday
 /// `i` (0 = mon .. 6 = sun); `start`/`end` are minutes since local midnight
 /// (`end` may exceed 1439 for a window that spills past midnight).
 struct Win {
     active: [bool; 7],
+    /// For a `Recur::Once` task: the unix timestamp whose local date the window
+    /// fires on. When `Some`, `active` is ignored and the window is live only on
+    /// the single day whose midnight..+24h contains this instant — so a one-shot
+    /// task fires exactly once (the date passes) with no completion flag needed,
+    /// and a past-dated once task contributes no future edge. `None` for weekly
+    /// windows, which use `active` as before.
+    on_date: Option<UnixTime>,
     start: u32,
     end: u32,
     text: String,
@@ -56,6 +69,7 @@ impl Win {
         }
         Win {
             active,
+            on_date: None,
             start: parse_hhmm(&w.start).unwrap(),
             end: parse_hhmm(&w.end).unwrap(),
             text: w.text.clone(),
@@ -65,23 +79,32 @@ impl Win {
         }
     }
 
-    /// Normalize a `tasks` row, or `None` when it can't yet drive a window:
-    /// a deadline-only task (`minutes == None`, no time-of-day cue) or a
-    /// `Recur::Once` task (no weekday anchor — one-shot firing needs a
-    /// completion flag the read-only svc can't set, so it's deferred). Weekly
-    /// tasks map directly, exactly like a `[[nudge]]` block.
+    /// Normalize a `tasks` row, or `None` when it can't yet drive a window: a
+    /// `Recur::Once` task with no deadline (no weekday anchor — one-shot firing
+    /// needs a completion flag the read-only svc can't set, and there's no date
+    /// to anchor a single firing to either; stays a planner-only row). A
+    /// `Recur::Once` task with a deadline is date-anchored instead: it fires on
+    /// the deadline's calendar date and never again (the date passes), so no
+    /// completion flag is needed. Weekly tasks map directly, like a `[[nudge]]`
+    /// block. Either kind may be missing a `minutes` time-of-day cue (a
+    /// deadline-only task, or a deadline whose only meaningful part is the
+    /// date) — that falls back to [`DEFAULT_TASK_MINUTES`] rather than
+    /// producing no window at all (step 4).
     fn from_task(t: &Task) -> Option<Win> {
-        let start = t.minutes?;
-        let days = match &t.recur {
-            Recur::Weekly(days) => days,
-            Recur::Once => return None,
+        let (active, on_date) = match &t.recur {
+            Recur::Weekly(days) => {
+                let mut active = [false; 7];
+                for d in days {
+                    active[*d as usize] = true;
+                }
+                (active, None)
+            }
+            Recur::Once => ([false; 7], Some(t.deadline?)),
         };
-        let mut active = [false; 7];
-        for d in days {
-            active[*d as usize] = true;
-        }
+        let start = t.minutes.unwrap_or(DEFAULT_TASK_MINUTES);
         Some(Win {
             active,
+            on_date,
             start,
             end: start + TASK_WINDOW_MINUTES,
             text: t.title.clone(),
@@ -124,7 +147,13 @@ pub fn context_with_tasks(rules: &Rules, tasks: &[Task], now: LocalNow) -> Sched
         let wd = (now.weekday + day_off) % 7;
         let midnight = now.unix - (now.minutes as i64) * 60 + (day_off as i64) * 86_400;
         for w in &wins {
-            if !w.active[wd as usize] {
+            let active_today = match w.on_date {
+                // Once task: live only on the day whose local date contains the
+                // deadline instant (this day_off's midnight..+24h).
+                Some(d) => d >= midnight && d < midnight + 86_400,
+                None => w.active[wd as usize],
+            };
+            if !active_today {
                 continue;
             }
             let (s, e) = (w.start, w.end);
@@ -157,10 +186,27 @@ pub fn context_with_tasks(rules: &Rules, tasks: &[Task], now: LocalNow) -> Sched
         ladder: rules.escalation.ladder(),
         snooze_secs: rules.escalation.snooze_secs,
         checkin_after_secs: rules.escalation.checkin(),
+        sample_secs: rules.escalation.sample(),
+        ontask_secs: rules.escalation.ontask(),
+        off_task_secs: rules.escalation.off_task_secs,
+        break_secs: rules.escalation.break_secs,
+        // Only a live drift check-in can be answered No, so only the svc knows
+        // when the §6.5 list is worth computing; it fills this in at that edge.
+        task_rows: Vec::new(),
         // Schedule knows nothing of live activity; the svc overrides these at the
-        // relevant edge after probing AW (presence at check-in, mode at task-start).
+        // relevant edge after probing AW (presence at check-in, mode at task-start,
+        // foreground app at a sample edge). `foreground_on_task` defaults to true so
+        // a missing probe — AW down, or any non-sample edge — never manufactures an
+        // off-task run (PLAN §7: AW down → treat as on-task, don't escalate).
         presence: Presence::Unknown,
         mode: Mode::OffTask,
+        foreground_on_task: true,
+        // §6.4: `true` default for the same reason — only a due on-task tick's
+        // probe (svc) may flip it, so a missing signal never manufactures a nag.
+        any_task_on_task: true,
+        // Tools-since-last-check-in accumulator snapshot (Tier-B P2): the svc
+        // fills it only while a check-in that can enter classification is up.
+        classify_tools: Vec::new(),
     }
 }
 
@@ -239,8 +285,10 @@ text = "work"
             minutes,
             recur,
             mode_override: None,
-            trigger_source: TriggerSource::Manual,
+            task_source: TriggerSource::Manual,
             gcal_event_id: None,
+            estimate_minutes: None,
+            logged_minutes: 0,
         }
     }
 
@@ -273,14 +321,85 @@ text = "work"
         );
     }
 
-    // Once (no weekday anchor) and deadline-only (no time-of-day) tasks are not
-    // yet schedulable, so they contribute no edges.
+    // A Once task with no deadline has nothing to anchor the single firing to
+    // and contributes no edge — stays a planner-only row.
     #[test]
-    fn once_and_deadline_only_tasks_skipped() {
+    fn undated_once_skipped() {
         let empty = parse("[anchor]\ndefault_text = \"idle\"\n").unwrap();
-        let once = task(Some(9 * 60), Recur::Once, "call mum");
-        let deadline_only = task(None, Recur::Weekly(vec![0]), "report");
-        let ctx = context_with_tasks(&empty, &[once, deadline_only], at(0, 9 * 60 + 10));
+        let undated_once = task(Some(9 * 60), Recur::Once, "call mum"); // deadline None
+        let ctx = context_with_tasks(&empty, std::slice::from_ref(&undated_once), at(0, 9 * 60 + 10));
+        assert!(!ctx.in_window);
+        assert_eq!(ctx.next_edge, None);
+    }
+
+    // A deadline-only task (no `minutes` time-of-day cue) still gets a window:
+    // it falls back to DEFAULT_TASK_MINUTES (09:00) rather than never firing.
+    #[test]
+    fn deadline_only_weekly_task_uses_default_minutes() {
+        let empty = parse("[anchor]\ndefault_text = \"idle\"\n").unwrap();
+        let t = task(None, Recur::Weekly(vec![0]), "report");
+
+        // Monday 09:10 — inside the fallback 09:00-09:30 window.
+        let ctx = context_with_tasks(&empty, std::slice::from_ref(&t), at(0, 9 * 60 + 10));
+        assert!(ctx.in_window);
+        assert_eq!(ctx.window_text, "report");
+        assert_eq!(
+            ctx.next_edge,
+            Some(Edge { at: (9 * 60 + 30) as i64 * 60, kind: EdgeKind::WindowEnd })
+        );
+    }
+
+    // A dated-but-time-of-day-less Once task (deadline set, minutes None) also
+    // falls back to DEFAULT_TASK_MINUTES and fires on the deadline's date.
+    #[test]
+    fn deadline_only_once_task_uses_default_minutes() {
+        let empty = parse("[anchor]\ndefault_text = \"idle\"\n").unwrap();
+        let mut once = task(None, Recur::Once, "renew passport");
+        once.deadline = Some(3 * 3600); // Monday, date-only deadline
+
+        let ctx = context_with_tasks(&empty, std::slice::from_ref(&once), at(0, 9 * 60 + 10));
+        assert!(ctx.in_window);
+        assert_eq!(ctx.window_text, "renew passport");
+    }
+
+    // A Once task dated today fires: its window opens at `minutes` on the
+    // deadline's date and closes TASK_WINDOW_MINUTES later.
+    #[test]
+    fn dated_once_task_fires_on_its_date() {
+        let empty = parse("[anchor]\ndefault_text = \"idle\"\n").unwrap();
+        // Monday midnight is unix 0 in this harness (at() sets unix = minutes*60).
+        // Deadline anywhere within Monday anchors the fire to Monday.
+        let mut once = task(Some(9 * 60), Recur::Once, "call mum");
+        once.deadline = Some(9 * 3600); // Monday 09:00
+
+        // Monday 09:10 — inside the 09:00–09:30 synthesized window.
+        let ctx = context_with_tasks(&empty, std::slice::from_ref(&once), at(0, 9 * 60 + 10));
+        assert!(ctx.in_window);
+        assert_eq!(ctx.window_text, "call mum");
+        assert_eq!(
+            ctx.next_edge,
+            Some(Edge { at: (9 * 60 + 30) as i64 * 60, kind: EdgeKind::WindowEnd })
+        );
+
+        // Monday 08:00 — before it opens: next edge is the task start.
+        let ctx = context_with_tasks(&empty, std::slice::from_ref(&once), at(0, 8 * 60));
+        assert!(!ctx.in_window);
+        assert_eq!(
+            ctx.next_edge,
+            Some(Edge { at: 9 * 3600, kind: EdgeKind::TaskStart })
+        );
+    }
+
+    // A Once task whose date already passed contributes no future edge — it fired
+    // once and won't again, no completion flag required.
+    #[test]
+    fn past_dated_once_task_contributes_no_edge() {
+        let empty = parse("[anchor]\ndefault_text = \"idle\"\n").unwrap();
+        let mut once = task(Some(9 * 60), Recur::Once, "call mum");
+        once.deadline = Some(9 * 3600); // Monday 09:00
+        // Now is Tuesday 10:00 (unix = 1 day + 10h); Monday is in the past.
+        let now = LocalNow { unix: 86_400 + 10 * 3600, weekday: 1, minutes: 10 * 60 };
+        let ctx = context_with_tasks(&empty, std::slice::from_ref(&once), now);
         assert!(!ctx.in_window);
         assert_eq!(ctx.next_edge, None);
     }

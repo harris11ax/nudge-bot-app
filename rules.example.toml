@@ -35,6 +35,25 @@ snooze_secs = 600              # Snooze hides the prompt for this long
 # Post-start check-in: after you press Start, ask "still on it?" this many
 # seconds later. 0 (or omitting the field) disables check-ins entirely.
 checkin_after_secs = 0
+# STARTED-mode drift detection (UI-PLAN §6.1). Once you press Start, nudge-svc
+# samples the foreground app on this cadence — and only while a task is live, so
+# an idle machine wakes for nothing. 0 (or omitting the field) disables sampling.
+sample_secs = 0                # e.g. 300 to sample every 5 min
+# How long a *continuous* off-task run must last before "still working on X?"
+# appears. Returning to one of the task's tools resets the run, so a quick glance
+# elsewhere never triggers it. Which apps count as on-task comes from the task's
+# own tool list, falling back to [classify] productive_apps below.
+off_task_secs = 300
+# Answering "Take a break" to that check-in silences everything for this long,
+# then puts you back on the task (UI-PLAN §6.5).
+break_secs = 600
+# Tray > Pause silences everything for this long (UI-PLAN §6.6). A pause is a
+# real pause: no window opens and no check-in fires until it expires, or until
+# you pick Tray > Resume.
+pause_secs = 1800
+# Tray > Pause > Custom uses this duration instead. Edit it and Tray > Reload
+# rules to pick a one-off pause length without restarting nudge-svc.
+custom_pause_secs = 3600
 
 [classify]
 # On/off-task mode pick (UI-PLAN §1). When a nudge window opens, nudge-svc asks

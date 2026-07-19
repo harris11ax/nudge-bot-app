@@ -82,6 +82,16 @@ pub enum LoopSignal {
     /// Notification click-through: launch/focus the nudge-app GUI and record the
     /// click. Carries no core `Event` — it's a pure svc-side side effect.
     OpenApp,
+    /// Tray Pause (§6.6): the submenu's chosen duration rides along; `None`
+    /// (the "Default (rules)" item) falls back to `[escalation] pause_secs`,
+    /// which lives in rules — the loop deliberately doesn't hold them, so main
+    /// stamps the fallback on. Break's duration is rules-only, same deal.
+    Pause(UnixTime, Option<i64>),
+    /// The submenu's "Custom" item (step 5): duration is
+    /// `[escalation] custom_pause_secs`, same rules-side stamping as `Pause`'s
+    /// `None` case.
+    PauseCustom(UnixTime),
+    Break(UnixTime),
 }
 
 /// MsgWaitForMultipleObjects on {edge timer, quit event, reload event} + message
@@ -124,6 +134,13 @@ pub fn message_loop(
                 TrayCmd::Toggle => {
                     on_signal(LoopSignal::Core(Event::HotkeyToggle(local_now().unix)))
                 }
+                TrayCmd::Pause(secs) => on_signal(LoopSignal::Pause(local_now().unix, secs)),
+                TrayCmd::PauseCustom => {
+                    on_signal(LoopSignal::PauseCustom(local_now().unix))
+                }
+                TrayCmd::Resume => {
+                    on_signal(LoopSignal::Core(Event::Resume(local_now().unix)))
+                }
                 TrayCmd::Reload => on_signal(LoopSignal::Reload),
                 TrayCmd::Quit => return,
             }
@@ -134,7 +151,27 @@ pub fn message_loop(
                 PromptClick::Start => LoopSignal::Core(Event::Ack(local_now().unix)),
                 PromptClick::Snooze => LoopSignal::Core(Event::Snooze(local_now().unix)),
                 PromptClick::Skip => LoopSignal::Core(Event::Skip(local_now().unix)),
+                PromptClick::Yes => LoopSignal::Core(Event::CheckInYes(local_now().unix)),
+                PromptClick::No => LoopSignal::Core(Event::CheckInNo(local_now().unix)),
+                PromptClick::Break => LoopSignal::Break(local_now().unix),
                 PromptClick::Open => LoopSignal::OpenApp,
+                PromptClick::PickTask(id) => {
+                    LoopSignal::Core(Event::PickTask(local_now().unix, id))
+                }
+                // The classify window owns the row-index → app-name mapping; a
+                // row that no longer resolves (screen torn down between click
+                // and drain) is dropped rather than misrouted.
+                PromptClick::ClassifyRow(i, choice) => match crate::classify::app_at(i) {
+                    Some(app_name) => LoopSignal::Core(Event::Classify {
+                        at: local_now().unix,
+                        app_name,
+                        choice,
+                    }),
+                    None => continue,
+                },
+                PromptClick::ClassifyDone => {
+                    LoopSignal::Core(Event::ClassifyDone(local_now().unix))
+                }
             };
             on_signal(signal);
         }

@@ -7,15 +7,15 @@
   import Triggers from "./lib/Triggers.svelte";
   import Sidebar from "./lib/Sidebar.svelte";
   import Placeholder from "./lib/Placeholder.svelte";
-  import GoogleConnect from "./lib/GoogleConnect.svelte";
   import Calendar from "./lib/Calendar.svelte";
+  import Settings from "./lib/settings/Settings.svelte";
 
   // Left-rail tabs (UI-PLAN §2). Planner + Triggers are live in P1; Calendar
   // (read-only) lands in P2; write-to-primary is P3. Settings/Log come later.
   const TABS = [
     { id: "planner", label: "Planner", icon: "▣" },
     { id: "calendar", label: "Calendar", icon: "▦" },
-    { id: "triggers", label: "Triggers", icon: "＋" },
+    { id: "triggers", label: "Tasks", icon: "＋" },
     { id: "settings", label: "Settings", icon: "⚙" },
     { id: "log", label: "Log", icon: "≡" },
   ];
@@ -91,11 +91,7 @@
     {:else if active === "calendar"}
       <Calendar />
     {:else if active === "settings"}
-      <header class="head"><h1>Settings</h1></header>
-      <GoogleConnect />
-      <div class="card">
-        <p class="empty">Per-mode colors/sounds, productive-app list, snooze defaults, AW endpoint.</p>
-      </div>
+      <Settings />
     {:else}
       <Placeholder title="Log" note="sessions.db history view (edges + outcomes)." />
     {/if}

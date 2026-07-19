@@ -12,6 +12,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Mutex, Once, OnceLock};
 
 use nudge_core::escalate::Level;
+use nudge_core::state::Buttons;
 use nudge_core::Mode;
 use windows::core::{w, HSTRING};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -51,11 +52,18 @@ const BTN_FRAME: COLORREF = COLORREF(0x0090_9090);
 const BTN_W: i32 = 64;
 const N_BTNS: i32 = 3;
 
-/// Buttons, left→right; the last sits flush against the strip's right edge.
-const BUTTONS: [(&str, PromptClick); N_BTNS as usize] = [
+/// A task window's prompt, left→right; the last sits flush against the right edge.
+const BTNS_START: [(&str, PromptClick); N_BTNS as usize] = [
     ("Start", PromptClick::Start),
     ("Snooze", PromptClick::Snooze),
     ("Skip", PromptClick::Skip),
+];
+
+/// A §6.5 drift check-in: the box asks a question, so it takes an answer.
+const BTNS_YESNO: [(&str, PromptClick); N_BTNS as usize] = [
+    ("Yes", PromptClick::Yes),
+    ("No", PromptClick::No),
+    ("Break", PromptClick::Break),
 ];
 
 /// Where the strip docks on the primary display's vertical edge.
@@ -86,17 +94,34 @@ impl AnchorGeom {
     }
 }
 
-/// A user click on the prompt. Drained by the message loop: the three buttons
-/// map to core `Event`s (Start→Ack, Snooze→Snooze, Skip→Skip); a click on the
-/// strip body is [`PromptClick::Open`], handled as a pure svc-side side effect.
+/// A user click on the prompt or the §6.5 task list. Drained by the message
+/// loop, which maps each to a core `Event`; a click on the strip body is
+/// [`PromptClick::Open`], handled as a pure svc-side side effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PromptClick {
     Start,
     Snooze,
     Skip,
+    /// "Yes, still on it" at a drift check-in → `CheckInYes`.
+    Yes,
+    /// "No" at a drift check-in → `CheckInNo`, which brings up the task list.
+    No,
+    /// Take a break, from the check-in box or the list → `BreakFor`.
+    Break,
     /// Click on the strip body (left of the button cluster): a notification
     /// click-through that launches/focuses nudge-app (P1). Not a core event.
     Open,
+    /// A §6.5/§6.4 task-list row was picked, carrying that row's `tasks` rowid
+    /// → `Event::PickTask` (which enters classification from an OnTask
+    /// check-in, and resolves like Start elsewhere).
+    PickTask(i64),
+    /// One classification-screen row's choice, by row index — the classify
+    /// window resolves the index back to its app name (keeps this enum `Copy`)
+    /// → `Event::Classify`.
+    ClassifyRow(usize, nudge_core::state::ClassifyChoice),
+    /// The classification screen finished (every row routed, or dismissed)
+    /// → `Event::ClassifyDone`.
+    ClassifyDone,
 }
 
 static REGISTER: Once = Once::new();
@@ -117,12 +142,19 @@ pub fn poll_click() -> Option<PromptClick> {
     clicks().1.lock().ok()?.try_recv().ok()
 }
 
+/// Post a click from another window onto the same queue the message loop drains
+/// — the §6.5 task list's rows and its Break button are answers to the same
+/// question the strip asked, so they travel the same seam.
+pub fn send_click(c: PromptClick) {
+    let _ = clicks().0.send(c);
+}
+
 pub struct Anchor {
     hwnd: HWND,
 }
 
 impl Anchor {
-    pub fn create(text: &str, level: Level, mode: Mode, geom: AnchorGeom) -> Self {
+    pub fn create(text: &str, level: Level, mode: Mode, buttons: Buttons, geom: AnchorGeom) -> Self {
         unsafe {
             let hinst = GetModuleHandleW(None).expect("GetModuleHandleW");
             let class = w!("NudgeAnchor");
@@ -155,7 +187,7 @@ impl Anchor {
                 None,
             )
             .expect("anchor window");
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_tag(level, mode));
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_tag(level, mode, buttons));
             SetLayeredWindowAttributes(hwnd, COLORREF(0), mode_alpha(mode), LWA_ALPHA)
                 .expect("alpha");
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -163,14 +195,14 @@ impl Anchor {
         }
     }
 
-    /// Update text, level, and/or mode in place, repainting only when something
-    /// changed (avoids the destroy/recreate flicker on every escalation tick).
-    /// A mode change also re-applies the layered alpha so an off-task check-in
-    /// following an on-task prompt reads at full strength.
-    pub fn update(&mut self, text: &str, level: Level, mode: Mode) {
+    /// Update text, level, mode and/or button set in place, repainting only when
+    /// something changed (avoids the destroy/recreate flicker on every escalation
+    /// tick). A mode change also re-applies the layered alpha so an off-task
+    /// check-in following an on-task prompt reads at full strength.
+    pub fn update(&mut self, text: &str, level: Level, mode: Mode, buttons: Buttons) {
         unsafe {
             let mut dirty = false;
-            let tag = state_tag(level, mode);
+            let tag = state_tag(level, mode, buttons);
             let prev = GetWindowLongPtrW(self.hwnd, GWLP_USERDATA);
             if prev != tag {
                 SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, tag);
@@ -204,10 +236,10 @@ impl Drop for Anchor {
     }
 }
 
-/// Pack the paint state (escalation level + notification mode) into the single
-/// `GWLP_USERDATA` slot: level in the low byte, mode in bit 8. The WndProc is
-/// stateless, so all it needs to render is stored here.
-fn state_tag(level: Level, mode: Mode) -> isize {
+/// Pack the paint state (escalation level + notification mode + button set) into
+/// the single `GWLP_USERDATA` slot: level in the low byte, mode in bit 8, buttons
+/// in bit 9. The WndProc is stateless, so all it needs to render is stored here.
+fn state_tag(level: Level, mode: Mode, buttons: Buttons) -> isize {
     let l = match level {
         Level::L0 => 0,
         Level::L1 => 1,
@@ -217,12 +249,29 @@ fn state_tag(level: Level, mode: Mode) -> isize {
         Mode::OffTask => 0,
         Mode::OnTask => 1,
     };
-    l | (m << 8)
+    let b = match buttons {
+        Buttons::StartSnoozeSkip => 0,
+        // P1 stub (PLAN-step3 A.5): the §6.4 task-list picker renders as the
+        // Yes/No/Break set — No brings up the §6.5 list, which stands in for
+        // the real picker until P2 builds it.
+        Buttons::YesNoBreak | Buttons::TaskList => 1,
+    };
+    l | (m << 8) | (b << 9)
 }
 
 /// The mode bit extracted from a packed tag (0 = off-task, 1 = on-task).
 fn mode_bit(tag: isize) -> isize {
     (tag >> 8) & 1
+}
+
+/// The button set a packed tag names — the single place paint and hit-test agree
+/// on which buttons the strip is currently carrying.
+fn tag_buttons(tag: isize) -> &'static [(&'static str, PromptClick); N_BTNS as usize] {
+    if (tag >> 9) & 1 == 1 {
+        &BTNS_YESNO
+    } else {
+        &BTNS_START
+    }
 }
 
 fn mode_alpha(mode: Mode) -> u8 {
@@ -301,7 +350,7 @@ extern "system" fn anchor_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             // Buttons.
             let face = CreateSolidBrush(BTN_FACE);
             let frame = CreateSolidBrush(BTN_FRAME);
-            for (i, (label, _)) in BUTTONS.iter().enumerate() {
+            for (i, (label, _)) in tag_buttons(tag).iter().enumerate() {
                 let mut br = button_rect(rc.right, rc.bottom, i as i32);
                 FillRect(hdc, &br, face);
                 FrameRect(hdc, &br, frame);
@@ -320,7 +369,8 @@ extern "system" fn anchor_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPA
             let mut rc = RECT::default();
             let _ = GetClientRect(hwnd, &mut rc);
             let mut hit = false;
-            for (i, (_, click)) in BUTTONS.iter().enumerate() {
+            let tag = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+            for (i, (_, click)) in tag_buttons(tag).iter().enumerate() {
                 let br = button_rect(rc.right, rc.bottom, i as i32);
                 if x >= br.left && x < br.right && y >= br.top && y < br.bottom {
                     let _ = clicks().0.send(*click);
