@@ -131,6 +131,21 @@ impl Store {
                  gcal_event_id  TEXT,
                  status         TEXT    NOT NULL DEFAULT 'pending',
                  created_unix   INTEGER NOT NULL DEFAULT 0
+             );
+             -- Bulk Upload hierarchy (PLAN-bulk-upload.md §2): Project Groups →
+             -- Projects → Tasks. App-owned; the svc reads only `tasks`/`task_tools`,
+             -- so there is no parity copy in persist.rs. Names are unique in scope
+             -- (group globally; project within its group), case-insensitive, so
+             -- ingest resolves a name to one id (exact NOCASE match-or-create, §2).
+             CREATE TABLE IF NOT EXISTS project_groups (
+                 id   INTEGER PRIMARY KEY,
+                 name TEXT NOT NULL UNIQUE COLLATE NOCASE
+             );
+             CREATE TABLE IF NOT EXISTS projects (
+                 id       INTEGER PRIMARY KEY,
+                 group_id INTEGER NOT NULL REFERENCES project_groups(id),
+                 name     TEXT NOT NULL COLLATE NOCASE,
+                 UNIQUE (group_id, name)
              );",
         )?;
         // §7.1 rename: the user-facing `trigger_source` column is now `task_source`.
@@ -142,6 +157,10 @@ impl Store {
         for col in [
             "ALTER TABLE tasks ADD COLUMN estimate_minutes INTEGER",
             "ALTER TABLE tasks ADD COLUMN logged_minutes INTEGER NOT NULL DEFAULT 0",
+            // Bulk Upload (PLAN-bulk-upload.md §2): nullable FK to `projects`.
+            // Tolerant ADD — duplicate-column error on an already-migrated DB is
+            // ignored, same idiom as the columns above. Unfiled tasks stay NULL.
+            "ALTER TABLE tasks ADD COLUMN project_id INTEGER",
         ] {
             let _ = conn.execute(col, []);
         }
@@ -235,6 +254,72 @@ impl Store {
         }
         tx.commit()?;
         Ok(ids)
+    }
+
+    /// Resolve a `(project_group, project)` name pair to a `tasks.project_id`
+    /// (PLAN-bulk-upload.md §2). Exact NOCASE match-or-create: a group/project row
+    /// with the given name is reused; a missing one is created (group first, then
+    /// project under it). Trimmed names.
+    ///
+    /// - Blank group ⇒ `Ok(None)` (unfiled task). A blank group with a non-blank
+    ///   project is a row error (`project without a group`, §3) → `Err`.
+    /// - Blank project under a present group ⇒ `Ok(None)` (filed at group level is
+    ///   not modelled; the task stays unfiled). *(The group row is still created so
+    ///   later rows naming a project under it reuse it.)*
+    ///
+    /// Uses a single owned connection (no nested transaction): callers wrap the whole
+    /// bulk-upload in one transaction at the command layer (P4).
+    pub fn resolve_group_project(
+        &self,
+        group: &str,
+        project: &str,
+    ) -> rusqlite::Result<Option<i64>> {
+        let group = group.trim();
+        let project = project.trim();
+        if group.is_empty() {
+            if !project.is_empty() {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "project without a group".into(),
+                ));
+            }
+            return Ok(None);
+        }
+        // Match-or-create the group (name UNIQUE COLLATE NOCASE).
+        let group_id: i64 = match self.conn.query_row(
+            "SELECT id FROM project_groups WHERE name = ?1 COLLATE NOCASE",
+            rusqlite::params![group],
+            |r| r.get(0),
+        ) {
+            Ok(id) => id,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                self.conn.execute(
+                    "INSERT INTO project_groups (name) VALUES (?1)",
+                    rusqlite::params![group],
+                )?;
+                self.conn.last_insert_rowid()
+            }
+            Err(e) => return Err(e),
+        };
+        if project.is_empty() {
+            return Ok(None);
+        }
+        // Match-or-create the project within the group (UNIQUE (group_id, name)).
+        let project_id: i64 = match self.conn.query_row(
+            "SELECT id FROM projects WHERE group_id = ?1 AND name = ?2 COLLATE NOCASE",
+            rusqlite::params![group_id, project],
+            |r| r.get(0),
+        ) {
+            Ok(id) => id,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                self.conn.execute(
+                    "INSERT INTO projects (group_id, name) VALUES (?1, ?2)",
+                    rusqlite::params![group_id, project],
+                )?;
+                self.conn.last_insert_rowid()
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(Some(project_id))
     }
 
     /// Delete by rowid. Returns the number of rows removed (0 if not found).
@@ -892,6 +977,100 @@ mod tests {
         assert_eq!(store.list().unwrap().len(), 0);
         drop(store);
         let _ = std::fs::remove_file(&path);
+    }
+
+    // Bulk Upload P1: resolve_group_project match-or-creates, is NOCASE + trimmed,
+    // scopes project names per group, and handles the blank/error cases (§2/§3).
+    #[test]
+    fn resolve_group_project_match_or_create() {
+        let (store, path) = temp_store("resolve");
+
+        // First reference creates group+project; second reuses both.
+        let a = store.resolve_group_project("Work", "Alpha").unwrap().unwrap();
+        let a2 = store.resolve_group_project(" work ", "  ALPHA ").unwrap().unwrap();
+        assert_eq!(a, a2, "NOCASE + trimmed match reuses the same project");
+
+        // Same project *name* under a different group is a distinct row.
+        let b = store.resolve_group_project("Home", "Alpha").unwrap().unwrap();
+        assert_ne!(a, b);
+
+        // Different project under an existing group creates a new project, reuses group.
+        let c = store.resolve_group_project("Work", "Beta").unwrap().unwrap();
+        assert_ne!(a, c);
+
+        // Exactly two groups and three projects exist.
+        let groups: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM project_groups", [], |r| r.get(0))
+            .unwrap();
+        let projects: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((groups, projects), (2, 3));
+
+        // Blank group ⇒ unfiled (None); blank project under a group ⇒ None but the
+        // group is created for later reuse.
+        assert_eq!(store.resolve_group_project("", "").unwrap(), None);
+        assert_eq!(store.resolve_group_project("  ", "").unwrap(), None);
+        assert_eq!(store.resolve_group_project("Solo", "").unwrap(), None);
+        let groups2: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM project_groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(groups2, 3, "blank-project group 'Solo' was still created");
+
+        // Project without a group is a row error.
+        assert!(store.resolve_group_project("", "Orphan").is_err());
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // The tolerant `project_id` ALTER lands on a pre-hierarchy `tasks` table without
+    // clobbering existing rows (mirrors the task_source/estimate migration idiom).
+    #[test]
+    fn project_id_migration_is_tolerant() {
+        let mut p = std::env::temp_dir();
+        p.push(format!("nudge-app-db-test-{}-projmig.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+
+        // Build a legacy `tasks` table with no project_id column, one row.
+        {
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE tasks (
+                     id INTEGER PRIMARY KEY, title TEXT NOT NULL,
+                     description TEXT NOT NULL DEFAULT '', deadline INTEGER,
+                     task_type TEXT NOT NULL DEFAULT '', minutes INTEGER,
+                     recur TEXT NOT NULL DEFAULT 'once', mode_override TEXT,
+                     task_source TEXT NOT NULL DEFAULT 'manual', gcal_event_id TEXT,
+                     estimate_minutes INTEGER,
+                     logged_minutes INTEGER NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO tasks (title) VALUES ('legacy');",
+            )
+            .unwrap();
+        }
+
+        // Opening migrates in place: row survives, project_id defaults NULL.
+        let store = Store::open_at(p.clone()).unwrap();
+        let rows = store.list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].title, "legacy");
+        let pid: Option<i64> = store
+            .conn
+            .query_row("SELECT project_id FROM tasks WHERE id = ?1", [rows[0].id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pid, None);
+
+        // Re-open is idempotent (duplicate-column ALTER swallowed).
+        drop(store);
+        let store = Store::open_at(p.clone()).unwrap();
+        assert_eq!(store.list().unwrap().len(), 1);
+
+        drop(store);
+        let _ = std::fs::remove_file(&p);
     }
 }
 
