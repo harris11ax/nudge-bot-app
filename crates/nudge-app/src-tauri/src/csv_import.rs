@@ -119,6 +119,57 @@ fn parse_deadline(s: &str) -> Result<(i64, Option<u32>), String> {
     ))
 }
 
+/// File-format seam for bulk upload (PLAN-bulk-upload.md §4). Turns raw uploaded
+/// bytes into the CSV text that [`parse_import`] consumes. `.csv` bytes pass
+/// through as UTF-8 (BOM tolerated downstream); `.xlsx`/`.xlsm` are read in-app
+/// with `calamine` (pure-Rust, no runtime/network) — first worksheet, first row =
+/// header, cells → strings, re-emitted as canonical CSV. Everything below this
+/// seam (header mapping, validation, dedup, hierarchy) is format-agnostic.
+pub fn read_spreadsheet(bytes: &[u8], ext: &str) -> Result<String, String> {
+    match ext.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+        "csv" => String::from_utf8(bytes.to_vec())
+            .map_err(|_| "file is not valid UTF-8 text".to_string()),
+        "xlsx" | "xlsm" => xlsx_to_csv(bytes),
+        other => Err(format!("unsupported file type '.{other}' (expected .csv or .xlsx)")),
+    }
+}
+
+/// Read the first worksheet of an `.xlsx`/`.xlsm` blob and re-serialize it as CSV
+/// text (properly quoted) so the single [`parse_import`] path handles it. Cells
+/// become strings; blanks stay empty; whole-number floats drop their `.0` so an
+/// integer estimate like `90` round-trips as `90`, not `90.0`.
+fn xlsx_to_csv(bytes: &[u8]) -> Result<String, String> {
+    use calamine::{Data, Reader, Xlsx};
+    use std::io::Cursor;
+
+    let mut wb: Xlsx<_> =
+        Xlsx::new(Cursor::new(bytes)).map_err(|e| format!("cannot read .xlsx: {e}"))?;
+    let sheet = wb
+        .worksheet_range_at(0)
+        .ok_or_else(|| "spreadsheet has no worksheets".to_string())?
+        .map_err(|e| format!("cannot read first worksheet: {e}"))?;
+
+    let mut wtr = csv::Writer::from_writer(Vec::new());
+    for row in sheet.rows() {
+        let cells: Vec<String> = row
+            .iter()
+            .map(|c| match c {
+                Data::Empty => String::new(),
+                Data::String(s) => s.clone(),
+                Data::Int(i) => i.to_string(),
+                Data::Float(f) if f.fract() == 0.0 => (*f as i64).to_string(),
+                Data::Float(f) => f.to_string(),
+                Data::Bool(b) => b.to_string(),
+                other => other.to_string(),
+            })
+            .collect();
+        wtr.write_record(&cells)
+            .map_err(|e| format!("cannot serialize worksheet: {e}"))?;
+    }
+    let bytes = wtr.into_inner().map_err(|e| format!("csv flush failed: {e}"))?;
+    String::from_utf8(bytes).map_err(|e| format!("csv encode failed: {e}"))
+}
+
 /// Parse a CSV blob into per-record [`ImportRow`]s. Blank records are skipped.
 /// A missing `title` column makes every row invalid (no field to key on) rather
 /// than erroring the whole parse.
@@ -613,6 +664,58 @@ mod tests {
         assert_eq!(out.new_rows.len(), 1);
         assert_eq!(out.ignored.len(), 1);
         assert!(out.ignored[0].reason.contains("title"));
+    }
+
+    // --- P3: .xlsx reader ---------------------------------------------------
+
+    #[test]
+    fn read_spreadsheet_csv_passthrough_and_bad_ext() {
+        let csv = "title,recur\ngo,daily";
+        assert_eq!(read_spreadsheet(csv.as_bytes(), "csv").unwrap(), csv);
+        assert_eq!(read_spreadsheet(csv.as_bytes(), ".CSV").unwrap(), csv);
+        assert!(read_spreadsheet(csv.as_bytes(), "txt").is_err());
+    }
+
+    #[test]
+    fn read_spreadsheet_xlsx_feeds_parse_import() {
+        use rust_xlsxwriter::Workbook;
+
+        let mut wb = Workbook::new();
+        let ws = wb.add_worksheet();
+        // Header + one valid row; estimate written as a number to prove the
+        // whole-float → integer path (90.0 must round-trip as "90", not "90.0").
+        let header = [
+            "project_group",
+            "project",
+            "title",
+            "description",
+            "deadline",
+            "time_of_day",
+            "recur",
+            "task_type",
+            "estimate_minutes",
+            "mode",
+        ];
+        for (c, h) in header.iter().enumerate() {
+            ws.write_string(0, c as u16, *h).unwrap();
+        }
+        ws.write_string(1, 0, "Marketing").unwrap();
+        ws.write_string(1, 1, "Q3 Launch").unwrap();
+        ws.write_string(1, 2, "Ship report").unwrap();
+        ws.write_string(1, 4, "2026-08-01").unwrap();
+        ws.write_number(1, 8, 90.0).unwrap();
+        let bytes = wb.save_to_buffer().unwrap();
+
+        let csv = read_spreadsheet(&bytes, "xlsx").unwrap();
+        let rows = parse_import(&csv);
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        assert!(r.valid, "errors: {:?}", r.errors);
+        assert_eq!(r.project_group, "Marketing");
+        assert_eq!(r.project, "Q3 Launch");
+        assert_eq!(r.form.title, "Ship report");
+        assert!(r.form.deadline.is_some());
+        assert_eq!(r.form.estimate_minutes, Some(90));
     }
 
     #[test]
