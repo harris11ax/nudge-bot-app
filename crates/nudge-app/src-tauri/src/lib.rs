@@ -1038,6 +1038,30 @@ fn set_style_bands(bands: Vec<String>) -> Result<(), String> {
         .map_err(|e| format!("set style bands: {e}"))
 }
 
+/// §7.3 Calendar tab: default duration (seconds) of an auto-tied event
+/// (Deadline → Deadline + this). Falls back to the 1 h built-in when unset.
+#[tauri::command]
+fn get_default_event_secs() -> Result<i64, String> {
+    let store = open()?;
+    Ok(store
+        .get_meta("default_event_secs")
+        .map_err(|e| format!("get default event secs: {e}"))?
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|d| *d > 0)
+        .unwrap_or(DEFAULT_EVENT_SECS))
+}
+
+#[tauri::command]
+fn set_default_event_secs(secs: i64) -> Result<(), String> {
+    if secs <= 0 {
+        return Err("event duration must be positive".into());
+    }
+    let store = open()?;
+    store
+        .set_meta("default_event_secs", &secs.to_string())
+        .map_err(|e| format!("set default event secs: {e}"))
+}
+
 /// Refresh the `app_usage` cache from ActivityWatch (90-day window aggregate),
 /// respecting the §6.7 24h cap unless `force`. Returns the resulting
 /// `app_usage_last_refresh` unix stamp (unchanged on a cap no-op). AW being
@@ -1132,6 +1156,8 @@ pub fn run() {
             list_task_ignores,
             get_style_bands,
             set_style_bands,
+            get_default_event_secs,
+            set_default_event_secs,
             refresh_app_usage
         ])
         .run(tauri::generate_context!())

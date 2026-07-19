@@ -80,6 +80,12 @@ export const listEvents = (from, to) => invoke("list_events", { from, to });
 /** @returns {Promise<number|null>} last successful Google refresh (unix seconds), or null if never. */
 export const googleLastRefresh = () => invoke("google_last_refresh");
 
+/** @returns {Promise<number>} default auto-tied event duration in seconds (§7.3). */
+export const getDefaultEventSecs = () => invoke("get_default_event_secs");
+
+/** Set the default auto-tied event duration, in seconds (must be positive). */
+export const setDefaultEventSecs = (secs) => invoke("set_default_event_secs", { secs });
+
 /** @returns {Promise<string|null>} the app's chosen write-target calendar id, or null if unpicked. */
 export const primaryCalendar = () => invoke("primary_calendar");
 

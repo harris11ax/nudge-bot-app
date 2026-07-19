@@ -1,12 +1,14 @@
 <script>
-  // Settings shell (PLAN-step3 C.4): sub-tabs. General keeps the existing
-  // Google connect card; Tools and Style are the P3 additions (§6.2/§6.9).
-  import GoogleConnect from "../GoogleConnect.svelte";
+  // Settings shell (PLAN-step3 C.4): sub-tabs. Tools/Style are the P3 additions
+  // (§6.2/§6.9); Calendar (§7.3) holds all Google/calendar settings, moved out
+  // of General.
+  import CalendarTab from "./CalendarTab.svelte";
   import ToolsTab from "./ToolsTab.svelte";
   import StyleTab from "./StyleTab.svelte";
 
   const SUBTABS = [
     { id: "general", label: "General" },
+    { id: "calendar", label: "Calendar" },
     { id: "tools", label: "Tools" },
     { id: "style", label: "Style" },
   ];
@@ -22,10 +24,11 @@
 </nav>
 
 {#if sub === "general"}
-  <GoogleConnect />
   <div class="card">
     <p class="empty">Per-mode colors/sounds, snooze defaults, AW endpoint.</p>
   </div>
+{:else if sub === "calendar"}
+  <CalendarTab />
 {:else if sub === "tools"}
   <ToolsTab />
 {:else}
