@@ -1,7 +1,22 @@
 {
+  "model": "sonnet",
+  "effortLevel": "low",
   "permissions": {
     "additionalDirectories": [
       "C:\\Users\\harri\\AppData\\Local\\activitywatch"
+    ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/auto-commit.sh\"",
+            "statusMessage": "Auto-committing working tree"
+          }
+        ]
+      }
     ]
   }
 }

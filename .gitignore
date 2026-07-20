@@ -1,0 +1,19 @@
+# Rust build artifacts
+/target/
+**/target/
+
+# Node
+node_modules/
+dist/
+build/
+
+# Logs / env / locks (Cargo.lock kept for the app; see below)
+*.log
+.env
+
+# Local harness state
+.claude/scheduled_tasks.lock
+
+# OS
+.DS_Store
+Thumbs.db

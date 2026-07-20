@@ -3,12 +3,17 @@
 //! All heavy logic (quick-add grammar, recur specs, mode labels) lives in
 //! nudge-core / [`db`] so this file stays a serialization + wiring seam.
 
+mod aw_usage;
+mod connectors;
+mod csv_import;
 mod db;
 mod google;
 #[cfg(windows)]
 mod ipc;
+mod launch;
 
-use db::{CalendarRow, EventRow, Store};
+use db::{CalendarRow, EventRow, Store, SuggestedTriggerRow};
+use google::calendar::EventInfo;
 use nudge_core::tasks::{parse_quickadd, Recur, Task, TriggerSource};
 use nudge_core::Mode;
 use serde::{Deserialize, Serialize};
@@ -30,8 +35,12 @@ pub struct TaskDto {
     pub recur: String,
     /// `"off_task"` / `"on_task"` / null (classify at the edge).
     pub mode_override: Option<String>,
-    pub trigger_source: String,
+    pub task_source: String,
     pub gcal_event_id: Option<String>,
+    /// Estimated minutes (§6.3), or null for no estimate.
+    pub estimate_minutes: Option<u32>,
+    /// Minutes worked so far — svc-owned cache, read-only for the progress bar.
+    pub logged_minutes: u32,
 }
 
 impl From<Task> for TaskDto {
@@ -49,8 +58,10 @@ impl From<Task> for TaskDto {
                 Some(Mode::OnTask) => Some("on_task".into()),
                 None => None,
             },
-            trigger_source: t.trigger_source.label().to_string(),
+            task_source: t.task_source.label().to_string(),
             gcal_event_id: t.gcal_event_id,
+            estimate_minutes: t.estimate_minutes,
+            logged_minutes: t.logged_minutes,
         }
     }
 }
@@ -82,8 +93,10 @@ fn add_quickadd(line: String) -> Result<TaskDto, String> {
         minutes: Some(q.minutes),
         recur: q.recur,
         mode_override: None,
-        trigger_source: TriggerSource::Manual,
+        task_source: TriggerSource::Manual,
         gcal_event_id: None,
+        estimate_minutes: None,
+        logged_minutes: 0,
     };
     insert_and_reload(task)
 }
@@ -91,7 +104,7 @@ fn add_quickadd(line: String) -> Result<TaskDto, String> {
 /// Fallback structured form (Triggers tab). `recur` accepts the same grammar as
 /// quick-add (`once` / keyword / day list). `minutes` is optional (deadline-only
 /// tasks). `mode_override` is `"off_task"`, `"on_task"`, or absent.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct NewTaskForm {
     pub title: String,
     #[serde(default)]
@@ -103,14 +116,18 @@ pub struct NewTaskForm {
     #[serde(default = "once_spec")]
     pub recur: String,
     pub mode_override: Option<String>,
+    /// Estimated minutes (§6.3), optional.
+    pub estimate_minutes: Option<u32>,
 }
 
 fn once_spec() -> String {
     "once".to_string()
 }
 
-#[tauri::command]
-fn add_task(form: NewTaskForm) -> Result<TaskDto, String> {
+/// Validate + convert a `NewTaskForm` into a domain `Task` (source forced
+/// `Manual`). Shared by `add_task` and the CSV batch import so both apply the
+/// same title/recur/mode checks server-side.
+fn form_to_task(form: NewTaskForm) -> Result<Task, String> {
     let title = form.title.trim();
     if title.is_empty() {
         return Err("title is empty".into());
@@ -121,7 +138,7 @@ fn add_task(form: NewTaskForm) -> Result<TaskDto, String> {
         Some("on_task") => Some(Mode::OnTask),
         _ => None,
     };
-    let task = Task {
+    Ok(Task {
         id: None,
         title: title.to_string(),
         desc: form.desc,
@@ -130,10 +147,171 @@ fn add_task(form: NewTaskForm) -> Result<TaskDto, String> {
         minutes: form.minutes,
         recur,
         mode_override,
-        trigger_source: TriggerSource::Manual,
+        task_source: TriggerSource::Manual,
         gcal_event_id: None,
-    };
+        estimate_minutes: form.estimate_minutes,
+        logged_minutes: 0,
+    })
+}
+
+#[tauri::command]
+fn add_task(form: NewTaskForm) -> Result<TaskDto, String> {
+    insert_and_reload(form_to_task(form)?)
+}
+
+/// §7.2 event-click **Add Task**: create a task from an existing Calendar Event
+/// and bind it to that event. Unlike [`add_task`], this does NOT auto-tie a fresh
+/// event — the task adopts the pre-existing `event_id` as its binding, so
+/// `insert_and_reload`'s [`try_autotie`] is skipped (the binding is already set).
+/// The event is left untouched (no propagation); the UI pre-fills the form from
+/// the event's fields and the user may complete any missing ones before saving.
+#[tauri::command]
+fn add_task_for_event(event_id: String, form: NewTaskForm) -> Result<TaskDto, String> {
+    let event_id = event_id.trim();
+    if event_id.is_empty() {
+        return Err("event id is empty".into());
+    }
+    let mut task = form_to_task(form)?;
+    task.gcal_event_id = Some(event_id.to_string());
     insert_and_reload(task)
+}
+
+/// Parse a CSV blob into per-row verdicts for the filter screen (P2). Pure
+/// validation — nothing is written; the UI decides which rows to import.
+#[tauri::command]
+fn validate_csv_import(text: String) -> Vec<csv_import::ImportRowDto> {
+    csv_import::parse_import(&text)
+        .into_iter()
+        .map(csv_import::ImportRowDto::from)
+        .collect()
+}
+
+/// Import a batch of client-approved rows in ONE transaction, then signal the
+/// svc ONCE. Every row is re-validated server-side (`form_to_task`) — the client
+/// toggle is not trusted — and any failure aborts the whole batch. Returns the
+/// number of tasks written.
+#[tauri::command]
+fn import_tasks(rows: Vec<NewTaskForm>) -> Result<usize, String> {
+    if rows.is_empty() {
+        return Err("no rows to import".into());
+    }
+    let tasks: Vec<Task> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(i, form)| form_to_task(form).map_err(|e| format!("row {}: {e}", i + 1)))
+        .collect::<Result<_, _>>()?;
+    let mut store = open()?;
+    let ids = store
+        .insert_batch(&tasks)
+        .map_err(|e| format!("import insert: {e}"))?;
+    db::signal_reload();
+    Ok(ids.len())
+}
+
+// --- Bulk Upload (PLAN-bulk-upload.md §7 P4) ---
+
+/// One row dropped by dedup, for the report block: the row DTO plus the matched
+/// reason (`task "X" with deadline <ts> already exists` — an exact title+deadline
+/// duplicate; matching only one of the two is not a duplicate).
+#[derive(Serialize)]
+pub struct IgnoredRowDto {
+    pub row: csv_import::ImportRowDto,
+    pub reason: String,
+}
+
+/// Result of [`validate_bulk_upload`] (PLAN-bulk-upload.md §6.1): the new unique
+/// rows (valid table) and the ignored duplicates (report block). Both are fully
+/// editable client-side; the client re-calls validate as the user edits.
+#[derive(Serialize)]
+pub struct BulkValidationDto {
+    pub new_rows: Vec<csv_import::ImportRowDto>,
+    pub ignored_rows: Vec<IgnoredRowDto>,
+}
+
+/// Build the dedup key-set from a live snapshot of the current `tasks` (§5): the
+/// report is computed against the DB, never the client's stale view.
+fn existing_keys(store: &db::Store) -> Result<csv_import::ExistingKeys, String> {
+    let tasks = store.list().map_err(|e| format!("list tasks: {e}"))?;
+    let mut keys = csv_import::ExistingKeys::new();
+    for t in &tasks {
+        keys.insert(&t.title, t.deadline);
+    }
+    Ok(keys)
+}
+
+/// Parse uploaded bytes (`.csv`/`.xlsx`/`.xlsm`) into new-unique vs.
+/// ignored-duplicate rows (PLAN-bulk-upload.md §4/§5). Pure read: nothing is
+/// written. `ext` is the source file extension (`csv`, `xlsx`, …); CSV-paste
+/// callers pass the text encoded as UTF-8 bytes with `ext = "csv"`.
+#[tauri::command]
+fn validate_bulk_upload(bytes: Vec<u8>, ext: String) -> Result<BulkValidationDto, String> {
+    let text = csv_import::read_spreadsheet(&bytes, &ext)?;
+    let rows = csv_import::parse_import(&text);
+    let store = open()?;
+    let mut existing = existing_keys(&store)?;
+    let outcome = csv_import::dedup_rows(rows, &mut existing);
+    Ok(BulkValidationDto {
+        new_rows: outcome
+            .new_rows
+            .into_iter()
+            .map(csv_import::ImportRowDto::from)
+            .collect(),
+        ignored_rows: outcome
+            .ignored
+            .into_iter()
+            .map(|ig| IgnoredRowDto {
+                row: csv_import::ImportRowDto::from(ig.row),
+                reason: ig.reason,
+            })
+            .collect(),
+    })
+}
+
+/// One client-approved bulk-upload row: the task form plus its (unresolved)
+/// Project Group → Project names. Group/project resolve to a `project_id` inside
+/// the confirm transaction (exact NOCASE match-or-create).
+#[derive(Deserialize)]
+pub struct BulkRowInput {
+    pub form: NewTaskForm,
+    #[serde(default)]
+    pub project_group: String,
+    #[serde(default)]
+    pub project: String,
+}
+
+/// Confirm a bulk upload (PLAN-bulk-upload.md §6.4): re-validate every row
+/// server-side (`form_to_task`), re-dedup against a LIVE snapshot (client toggles
+/// are not trusted), then resolve the hierarchy and insert with `project_id` in
+/// ONE transaction, signalling the svc ONCE. Returns the number of tasks written.
+/// A row whose group/project is unmappable (project without a group) aborts.
+#[tauri::command]
+fn confirm_bulk_upload(rows: Vec<BulkRowInput>) -> Result<usize, String> {
+    if rows.is_empty() {
+        return Err("no rows to import".into());
+    }
+    let mut store = open()?;
+    let mut existing = existing_keys(&store)?;
+
+    let mut items: Vec<db::BulkInsert> = Vec::with_capacity(rows.len());
+    for (i, input) in rows.into_iter().enumerate() {
+        let group = input.project_group;
+        let project = input.project;
+        let task = form_to_task(input.form).map_err(|e| format!("row {}: {e}", i + 1))?;
+        // Re-dedup: skip any row that collides with the DB or an earlier accepted
+        // row in this batch (mirrors the §5 rule the report screen showed).
+        if !existing.try_reserve(&task.title, task.deadline) {
+            continue;
+        }
+        items.push(db::BulkInsert { task, group, project });
+    }
+    if items.is_empty() {
+        return Err("no unique rows to import".into());
+    }
+    let ids = store
+        .insert_bulk(&items)
+        .map_err(|e| format!("bulk insert: {e}"))?;
+    db::signal_reload();
+    Ok(ids.len())
 }
 
 /// Task id passed via `--task <id>` on a cold-start launch (9d-ii click-through).
@@ -157,12 +335,222 @@ fn delete_task(id: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// Default bound-event duration when none is configured (§7.2: Deadline → Deadline + 1 h).
+const DEFAULT_EVENT_SECS: i64 = 3600;
+
+/// Bound-event bounds for a task Deadline (§7.2): event start = Deadline, event
+/// end = Deadline + `duration_secs`. Pure so the +1 h default is unit-testable.
+fn default_event_bounds(deadline: i64, duration_secs: i64) -> (i64, i64) {
+    (deadline, deadline + duration_secs)
+}
+
+/// §7.2 auto-tie on create: create a bound Calendar Event for a freshly-inserted
+/// task and persist the binding. Best-effort and non-fatal — a task with no
+/// Deadline, no primary calendar chosen, or an offline/auth failure simply stays
+/// unbound (GOOGLE-PLAN.md constraint #4: offline degrades, never breaks). Returns
+/// the bound event id on success, `None` otherwise.
+fn try_autotie(store: &Store, task_id: i64, title: &str, deadline: Option<i64>) -> Option<String> {
+    // Only tie tasks that carry a hard Deadline — there is no anchor otherwise.
+    let deadline = deadline?;
+    // No write target picked yet ⇒ nothing to tie to (not an error).
+    let calendar_id = store.primary_calendar_id().ok().flatten()?;
+
+    let duration = store
+        .get_meta("default_event_secs")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|d| *d > 0)
+        .unwrap_or(DEFAULT_EVENT_SECS);
+    let (start_unix, end_unix) = default_event_bounds(deadline, duration);
+
+    let token = match google::access_token() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("auto-tie skipped (no Google token): {e}");
+            return None;
+        }
+    };
+    let event = match google::calendar::create_event(
+        &token,
+        &calendar_id,
+        title,
+        start_unix,
+        end_unix,
+        false,
+    ) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("auto-tie skipped (event create failed): {e}");
+            return None;
+        }
+    };
+    // Cache the event locally so the Calendar tab shows it before the next
+    // refresh, then persist the binding. A cache miss is non-fatal.
+    let _ = store.upsert_event(&calendar_id, &event);
+    if let Err(e) = store.set_task_gcal_event_id(task_id, Some(&event.event_id)) {
+        eprintln!("auto-tie: event created but binding not saved: {e}");
+        return None;
+    }
+    Some(event.event_id)
+}
+
+/// §7.2 edit-propagation: push a task's edited title/Deadline onto its bound
+/// Calendar Event. Best-effort and non-fatal, mirroring [`try_autotie`] — an
+/// unbound task, a task that lost its Deadline, no primary calendar, or an
+/// offline/auth failure simply leaves the local task edited and the event as-is
+/// (GOOGLE-PLAN.md constraint #4). Returns the event id still bound afterwards.
+fn try_propagate_event(
+    store: &Store,
+    event_id: &str,
+    title: &str,
+    deadline: Option<i64>,
+) -> Option<String> {
+    // No Deadline anymore ⇒ nothing to anchor the event to; leave it untouched.
+    let deadline = deadline?;
+    let calendar_id = store.primary_calendar_id().ok().flatten()?;
+
+    let duration = store
+        .get_meta("default_event_secs")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|d| *d > 0)
+        .unwrap_or(DEFAULT_EVENT_SECS);
+    let (start_unix, end_unix) = default_event_bounds(deadline, duration);
+
+    let token = match google::access_token() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("edit-propagation skipped (no Google token): {e}");
+            return Some(event_id.to_string());
+        }
+    };
+    match google::calendar::update_event(
+        &token,
+        &calendar_id,
+        event_id,
+        title,
+        start_unix,
+        end_unix,
+        false,
+    ) {
+        Ok(event) => {
+            // Refresh the local cache so the Calendar tab reflects the edit now.
+            let _ = store.upsert_event(&calendar_id, &event);
+            Some(event.event_id)
+        }
+        Err(e) => {
+            eprintln!("edit-propagation skipped (event update failed): {e}");
+            Some(event_id.to_string())
+        }
+    }
+}
+
+/// Update an existing task by id (§7.2). Re-validates via `form_to_task` (same
+/// title/recur/mode checks as create), writes the user-editable fields in place
+/// (origin, event binding, hierarchy, and accrual are preserved by
+/// [`db::Store::update`]), then best-effort propagates the edited title/Deadline
+/// onto the bound Calendar Event, and finally pings the svc.
+#[tauri::command]
+fn update_task(id: i64, form: NewTaskForm) -> Result<TaskDto, String> {
+    let task = form_to_task(form)?;
+    let store = open()?;
+    // Read the existing row first: its `gcal_event_id` is the propagation target
+    // and its post-edit value carries into the returned DTO.
+    let existing = store
+        .get(id)
+        .map_err(|e| format!("load task: {e}"))?
+        .ok_or_else(|| format!("task {id} not found"))?;
+    if store.update(id, &task).map_err(|e| format!("update: {e}"))? == 0 {
+        return Err(format!("task {id} not found"));
+    }
+    // Rebuild the stored task: editable fields from the form, preserved fields
+    // (id, source, binding, accrual) from the existing row.
+    let mut updated = task;
+    updated.id = Some(id);
+    updated.task_source = existing.task_source;
+    updated.gcal_event_id = existing.gcal_event_id;
+    updated.logged_minutes = existing.logged_minutes;
+    // §7.2: if the task is bound to an event, push the edit onto it.
+    if let Some(event_id) = updated.gcal_event_id.as_deref() {
+        updated.gcal_event_id =
+            try_propagate_event(&store, event_id, &updated.title, updated.deadline);
+    }
+    db::signal_reload();
+    Ok(TaskDto::from(updated))
+}
+
 fn insert_and_reload(mut task: Task) -> Result<TaskDto, String> {
     let store = open()?;
     let id = store.insert(&task).map_err(|e| format!("insert: {e}"))?;
     task.id = Some(id);
+    // §7.2: bind a Calendar Event on create (best-effort; never blocks the task).
+    if task.gcal_event_id.is_none() {
+        task.gcal_event_id = try_autotie(&store, id, &task.title, task.deadline);
+    }
     db::signal_reload();
     Ok(TaskDto::from(task))
+}
+
+// --- Suggested-triggers inbox (10d) ---
+
+/// Wire shape of a pending suggestion (Triggers tab — Suggested section).
+#[derive(Serialize)]
+pub struct SuggestedTriggerDto {
+    pub id: i64,
+    pub title: String,
+    pub description: String,
+    pub deadline: Option<i64>,
+    pub source: String,
+    pub gcal_event_id: Option<String>,
+    pub created_unix: i64,
+}
+
+impl From<SuggestedTriggerRow> for SuggestedTriggerDto {
+    fn from(r: SuggestedTriggerRow) -> Self {
+        SuggestedTriggerDto {
+            id: r.id,
+            title: r.title,
+            description: r.description,
+            deadline: r.deadline,
+            source: r.source,
+            gcal_event_id: r.gcal_event_id,
+            created_unix: r.created_unix,
+        }
+    }
+}
+
+/// Pending suggestions, newest first.
+#[tauri::command]
+fn list_suggested_triggers() -> Result<Vec<SuggestedTriggerDto>, String> {
+    let store = open()?;
+    let rows = store
+        .list_suggested_triggers()
+        .map_err(|e| format!("list suggested triggers: {e}"))?;
+    Ok(rows.into_iter().map(SuggestedTriggerDto::from).collect())
+}
+
+/// Accept a suggestion: creates the live task and pings the svc, returning the
+/// new task's id.
+#[tauri::command]
+fn accept_suggested_trigger(id: i64) -> Result<i64, String> {
+    let store = open()?;
+    let task_id = store
+        .accept_suggested_trigger(id)
+        .map_err(|e| format!("accept suggested trigger: {e}"))?;
+    db::signal_reload();
+    Ok(task_id)
+}
+
+/// Dismiss a suggestion; no task is created.
+#[tauri::command]
+fn dismiss_suggested_trigger(id: i64) -> Result<(), String> {
+    let store = open()?;
+    store
+        .dismiss_suggested_trigger(id)
+        .map_err(|e| format!("dismiss suggested trigger: {e}"))?;
+    Ok(())
 }
 
 // --- Calendar (10b, read-only) ---
@@ -311,6 +699,460 @@ fn google_last_refresh() -> Result<Option<i64>, String> {
         .and_then(|s| s.parse().ok()))
 }
 
+/// Connector run result surfaced to the Triggers tab as a toast.
+#[derive(Serialize)]
+pub struct ConnectorSummaryDto {
+    pub gcal_added: usize,
+    pub gmail_added: usize,
+    pub gmail_scanned: usize,
+}
+
+/// Run the Gmail/GCal connectors (10e): scan upcoming calendar events + recent
+/// actionable mail and deposit deduped candidates into the Suggested-triggers
+/// inbox. Piggybacks a refresh so the calendar cache is fresh first; a Gmail
+/// failure surfaces as `Err` but any calendar suggestions already deposited
+/// persist. The frontend refreshes the Suggested section on success.
+#[tauri::command]
+fn run_connectors() -> Result<ConnectorSummaryDto, String> {
+    // Ensure the calendar cache the connector reads from is current.
+    refresh_calendars(false)?;
+    let store = open()?;
+    let token = google::access_token()?;
+    let s = connectors::run_connectors(&store, &token, now_unix())?;
+    Ok(ConnectorSummaryDto {
+        gcal_added: s.gcal_added,
+        gmail_added: s.gmail_added,
+        gmail_scanned: s.gmail_scanned,
+    })
+}
+
+// --- Calendar (10c, write — primary calendar only) ---
+
+/// The app-chosen write-target calendar id, or `None` if not yet picked (and
+/// Google hasn't reported one as primary either — e.g. before first refresh).
+#[tauri::command]
+fn primary_calendar() -> Result<Option<String>, String> {
+    let store = open()?;
+    store
+        .primary_calendar_id()
+        .map_err(|e| format!("primary calendar: {e}"))
+}
+
+/// Set the write-target calendar (Settings — Calendar picker).
+#[tauri::command]
+fn set_primary_calendar(gcal_id: String) -> Result<(), String> {
+    let store = open()?;
+    store
+        .set_primary_calendar(&gcal_id)
+        .map_err(|e| format!("set primary calendar: {e}"))
+}
+
+/// Create/edit dialog payload — unix-second bounds already resolved by the
+/// frontend (same convention as [`EventDto`]/[`EventRow`]).
+#[derive(Deserialize)]
+pub struct EventForm {
+    pub summary: String,
+    pub start_unix: i64,
+    pub end_unix: i64,
+    #[serde(default)]
+    pub all_day: bool,
+}
+
+fn require_primary_calendar(store: &Store) -> Result<String, String> {
+    store
+        .primary_calendar_id()
+        .map_err(|e| format!("primary calendar: {e}"))?
+        .ok_or_else(|| "no primary calendar set — pick one in Settings first".to_string())
+}
+
+/// Create an event on the primary calendar. Writes an optimistic local row
+/// under a temporary id first (so a push failure still leaves *something*
+/// visible offline, per GOOGLE-PLAN.md constraint #4), then pushes to Google
+/// synchronously — this command's architecture is blocking end-to-end like
+/// every other Google call here (no async runtime in this crate), so
+/// "optimistic" describes write ordering, not a non-blocking UI: on success the
+/// temp row is swapped for the authoritative one; on failure the temp row is
+/// left in place and the error is surfaced to the caller.
+#[tauri::command]
+fn create_event(form: EventForm) -> Result<EventDto, String> {
+    let store = open()?;
+    let calendar_id = require_primary_calendar(&store)?;
+
+    let temp_id = format!("local-{}-{}", now_unix(), std::process::id());
+    let optimistic = EventInfo {
+        event_id: temp_id.clone(),
+        summary: form.summary.clone(),
+        start_unix: form.start_unix,
+        end_unix: form.end_unix,
+        all_day: form.all_day,
+        updated_unix: now_unix(),
+        etag: String::new(),
+    };
+    store
+        .upsert_event(&calendar_id, &optimistic)
+        .map_err(|e| format!("optimistic insert: {e}"))?;
+
+    let token = google::access_token()?;
+    let pushed = google::calendar::create_event(
+        &token,
+        &calendar_id,
+        &form.summary,
+        form.start_unix,
+        form.end_unix,
+        form.all_day,
+    );
+    match pushed {
+        Ok(authoritative) => {
+            store
+                .delete_event(&temp_id)
+                .map_err(|e| format!("drop temp event: {e}"))?;
+            store
+                .upsert_event(&calendar_id, &authoritative)
+                .map_err(|e| format!("cache created event: {e}"))?;
+            Ok(EventDto {
+                event_id: authoritative.event_id,
+                calendar_id,
+                summary: authoritative.summary,
+                start_unix: authoritative.start_unix,
+                end_unix: authoritative.end_unix,
+                all_day: authoritative.all_day,
+            })
+        }
+        Err(e) => Err(format!(
+            "saved locally, but push to Google failed (will retry next refresh): {e}"
+        )),
+    }
+}
+
+/// Update an existing event's summary/time on the primary calendar. Same
+/// optimistic-then-push shape as [`create_event`], but the id is already known
+/// so there's no temp-row swap — a failed push just leaves the optimistic
+/// (new) values cached locally alongside the surfaced error.
+#[tauri::command]
+fn update_event(event_id: String, form: EventForm) -> Result<EventDto, String> {
+    let store = open()?;
+    let calendar_id = require_primary_calendar(&store)?;
+
+    let optimistic = EventInfo {
+        event_id: event_id.clone(),
+        summary: form.summary.clone(),
+        start_unix: form.start_unix,
+        end_unix: form.end_unix,
+        all_day: form.all_day,
+        updated_unix: now_unix(),
+        etag: String::new(),
+    };
+    store
+        .upsert_event(&calendar_id, &optimistic)
+        .map_err(|e| format!("optimistic update: {e}"))?;
+
+    let token = google::access_token()?;
+    let pushed = google::calendar::update_event(
+        &token,
+        &calendar_id,
+        &event_id,
+        &form.summary,
+        form.start_unix,
+        form.end_unix,
+        form.all_day,
+    );
+    match pushed {
+        Ok(authoritative) => {
+            store
+                .upsert_event(&calendar_id, &authoritative)
+                .map_err(|e| format!("cache updated event: {e}"))?;
+            Ok(EventDto {
+                event_id: authoritative.event_id,
+                calendar_id,
+                summary: authoritative.summary,
+                start_unix: authoritative.start_unix,
+                end_unix: authoritative.end_unix,
+                all_day: authoritative.all_day,
+            })
+        }
+        Err(e) => Err(format!(
+            "saved locally, but push to Google failed (will retry next refresh): {e}"
+        )),
+    }
+}
+
+/// Delete an event from the primary calendar (§7.2 event-click menu). Pushes
+/// the delete to Google first — an optimistic local drop before a failed push
+/// would silently lose an event that still exists upstream — then drops the
+/// cached row and unbinds any task that referenced it. A `410 Gone` from Google
+/// is treated as success (already deleted upstream). Returns the number of
+/// tasks that were unbound.
+#[tauri::command]
+fn delete_event(event_id: String) -> Result<usize, String> {
+    let store = open()?;
+    let calendar_id = require_primary_calendar(&store)?;
+
+    let token = google::access_token()?;
+    google::calendar::delete_event(&token, &calendar_id, &event_id)?;
+
+    store
+        .delete_event(&event_id)
+        .map_err(|e| format!("drop cached event: {e}"))?;
+    let unbound = store
+        .clear_tasks_bound_to_event(&event_id)
+        .map_err(|e| format!("unbind tasks: {e}"))?;
+    if unbound > 0 {
+        db::signal_reload();
+    }
+    Ok(unbound)
+}
+
+// --- Task tools + app classification (§6.2, PLAN-step3 P3) ---
+
+/// Wire shape of a selector/Settings app row (`app_usage` ⟕ `app_classes`).
+#[derive(Serialize)]
+pub struct AppDto {
+    pub name: String,
+    pub minutes_90d: i64,
+    /// `favorite | normal | hidden | not_tool` (unclassified reads `normal`).
+    pub class: String,
+}
+
+impl From<db::AppRow> for AppDto {
+    fn from(a: db::AppRow) -> Self {
+        AppDto { name: a.name, minutes_90d: a.minutes_90d, class: a.class }
+    }
+}
+
+/// One `(app_name, kind)` tool row; `kind ∈ tool | ignore`. `url` is the
+/// optional bound launch URL for web tools (§7.4c); `#[serde(default)]` keeps
+/// older callers that send only `{app_name, kind}` valid (url → `None`).
+#[derive(Serialize, Deserialize)]
+pub struct ToolDto {
+    pub app_name: String,
+    pub kind: String,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+/// Every app the Tools selector can offer, usage-sorted descending. The
+/// frontend pins favorites and filters hidden — this is the raw union.
+#[tauri::command]
+fn list_apps_for_selector() -> Result<Vec<AppDto>, String> {
+    let store = open()?;
+    let rows = store
+        .list_apps_for_selector()
+        .map_err(|e| format!("list apps: {e}"))?;
+    Ok(rows.into_iter().map(AppDto::from).collect())
+}
+
+/// Replace a task's tool list wholesale (§6.4 contract: svc reads this at the
+/// sample compare), then ping the svc so the change is live immediately.
+#[tauri::command]
+fn set_task_tools_cmd(task_id: i64, tools: Vec<ToolDto>) -> Result<(), String> {
+    let mut store = open()?;
+    let pairs: Vec<(String, String, Option<String>)> =
+        tools.into_iter().map(|t| (t.app_name, t.kind, t.url)).collect();
+    store
+        .set_task_tools(task_id, &pairs)
+        .map_err(|e| format!("set task tools: {e}"))?;
+    db::signal_reload();
+    Ok(())
+}
+
+/// A task's `(app_name, kind)` tool rows.
+#[tauri::command]
+fn list_task_tools_cmd(task_id: i64) -> Result<Vec<ToolDto>, String> {
+    let store = open()?;
+    let rows = store
+        .list_task_tools(task_id)
+        .map_err(|e| format!("list task tools: {e}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|(app_name, kind, url)| ToolDto { app_name, kind, url })
+        .collect())
+}
+
+/// Launch one attached tool from the task page (§7.4c): resolve its
+/// `(app_name, bound url)` to a website or exe and open it. Best-effort — a
+/// failing ShellExecute returns its error to the UI (surfaced as a small note)
+/// but is never fatal. Exe launches skip an already-running process.
+#[tauri::command]
+fn launch_tool(task_id: i64, app_name: String) -> Result<(), String> {
+    let store = open()?;
+    let url = store
+        .task_tool_url(task_id, &app_name)
+        .map_err(|e| format!("lookup tool url: {e}"))?;
+    let target = launch::resolve_target(&app_name, url.as_deref());
+    launch::launch(&target, &launch::running_exes())
+}
+
+/// "Launch all" for a task's tool set (§7.4c): open every `kind = "tool"` row
+/// (ignore-kind rows are skipped). Websites always open; exes skip if running.
+/// Returns the count launched; per-tool failures are collected and reported so
+/// one bad row can't abort the rest.
+#[tauri::command]
+fn launch_task_tools(task_id: i64) -> Result<usize, String> {
+    let store = open()?;
+    let rows = store
+        .list_task_tools(task_id)
+        .map_err(|e| format!("list task tools: {e}"))?;
+    let running = launch::running_exes();
+    let mut launched = 0usize;
+    let mut errs: Vec<String> = Vec::new();
+    for (app_name, kind, url) in rows {
+        if kind != "tool" {
+            continue;
+        }
+        let target = launch::resolve_target(&app_name, url.as_deref());
+        match launch::launch(&target, &running) {
+            Ok(()) => launched += 1,
+            Err(e) => errs.push(e),
+        }
+    }
+    if errs.is_empty() {
+        Ok(launched)
+    } else {
+        Err(errs.join("; "))
+    }
+}
+
+/// Set an app's global class (§6.2 favorite|normal|hidden|not_tool).
+#[tauri::command]
+fn set_app_class_cmd(app_name: String, class: String) -> Result<(), String> {
+    if !matches!(class.as_str(), "favorite" | "normal" | "hidden" | "not_tool") {
+        return Err(format!("unknown app class: {class}"));
+    }
+    let store = open()?;
+    store
+        .set_app_class(&app_name, &class)
+        .map_err(|e| format!("set app class: {e}"))
+}
+
+/// Explicitly-classified apps (Settings — Tools tab).
+#[tauri::command]
+fn list_app_classes() -> Result<Vec<AppDto>, String> {
+    let store = open()?;
+    let rows = store
+        .list_app_classes()
+        .map_err(|e| format!("list app classes: {e}"))?;
+    Ok(rows.into_iter().map(AppDto::from).collect())
+}
+
+/// Not-Tool recommendation seed: high-usage apps never used as any task's tool
+/// and not yet classified.
+#[tauri::command]
+fn list_not_tool_candidates() -> Result<Vec<AppDto>, String> {
+    let store = open()?;
+    let rows = store
+        .list_not_tool_candidates(20)
+        .map_err(|e| format!("list not-tool candidates: {e}"))?;
+    Ok(rows.into_iter().map(AppDto::from).collect())
+}
+
+/// Read-only view of per-task ignore rows (Settings — Tools tab).
+#[derive(Serialize)]
+pub struct IgnoreDto {
+    pub task_id: i64,
+    pub task_title: String,
+    pub app_name: String,
+}
+
+#[tauri::command]
+fn list_task_ignores() -> Result<Vec<IgnoreDto>, String> {
+    let store = open()?;
+    let rows = store
+        .list_all_ignores()
+        .map_err(|e| format!("list ignores: {e}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|(task_id, task_title, app_name)| IgnoreDto { task_id, task_title, app_name })
+        .collect())
+}
+
+/// §6.9 Style tab: completion-band colors persisted as a JSON array in `meta`.
+/// Empty vec = defaults (renderers keep their built-in palette).
+#[tauri::command]
+fn get_style_bands() -> Result<Vec<String>, String> {
+    let store = open()?;
+    let raw = store
+        .get_meta("style_bands")
+        .map_err(|e| format!("get style bands: {e}"))?;
+    match raw {
+        Some(s) => serde_json::from_str(&s).map_err(|e| format!("parse style bands: {e}")),
+        None => Ok(Vec::new()),
+    }
+}
+
+#[tauri::command]
+fn set_style_bands(bands: Vec<String>) -> Result<(), String> {
+    let store = open()?;
+    let s = serde_json::to_string(&bands).map_err(|e| format!("encode style bands: {e}"))?;
+    store
+        .set_meta("style_bands", &s)
+        .map_err(|e| format!("set style bands: {e}"))
+}
+
+/// §7.3 Calendar tab: default duration (seconds) of an auto-tied event
+/// (Deadline → Deadline + this). Falls back to the 1 h built-in when unset.
+#[tauri::command]
+fn get_default_event_secs() -> Result<i64, String> {
+    let store = open()?;
+    Ok(store
+        .get_meta("default_event_secs")
+        .map_err(|e| format!("get default event secs: {e}"))?
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|d| *d > 0)
+        .unwrap_or(DEFAULT_EVENT_SECS))
+}
+
+#[tauri::command]
+fn set_default_event_secs(secs: i64) -> Result<(), String> {
+    if secs <= 0 {
+        return Err("event duration must be positive".into());
+    }
+    let store = open()?;
+    store
+        .set_meta("default_event_secs", &secs.to_string())
+        .map_err(|e| format!("set default event secs: {e}"))
+}
+
+/// Refresh the `app_usage` cache from ActivityWatch (90-day window aggregate),
+/// respecting the §6.7 24h cap unless `force`. Returns the resulting
+/// `app_usage_last_refresh` unix stamp (unchanged on a cap no-op). AW being
+/// down is not an error — it just refreshes zero rows and does NOT stamp, so
+/// the next call retries.
+#[tauri::command]
+fn refresh_app_usage(force: bool) -> Result<i64, String> {
+    let store = open()?;
+    let now = now_unix();
+    if !force {
+        if let Some(last_ts) = store
+            .get_meta("app_usage_last_refresh")
+            .map_err(|e| format!("get meta: {e}"))?
+            .and_then(|s| s.parse::<i64>().ok())
+        {
+            if now - last_ts < 24 * 3600 {
+                return Ok(last_ts);
+            }
+        }
+    }
+    let usage = aw_usage::fetch_usage(90, now);
+    if usage.is_empty() {
+        // AW down or no window bucket: keep the stale cache + stamp so a
+        // retry isn't gated behind the 24h cap.
+        return Ok(store
+            .get_meta("app_usage_last_refresh")
+            .map_err(|e| format!("get meta: {e}"))?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0));
+    }
+    for (app, minutes) in &usage {
+        store
+            .upsert_app_usage(app, *minutes, now)
+            .map_err(|e| format!("upsert app usage: {e}"))?;
+    }
+    store
+        .set_meta("app_usage_last_refresh", &now.to_string())
+        .map_err(|e| format!("set meta: {e}"))?;
+    Ok(now)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(windows)]
@@ -330,16 +1172,269 @@ pub fn run() {
             list_tasks,
             add_quickadd,
             add_task,
+            add_task_for_event,
+            update_task,
+            validate_csv_import,
+            import_tasks,
+            validate_bulk_upload,
+            confirm_bulk_upload,
             delete_task,
             get_pending_task,
             google::google_status,
             google::google_connect,
+            google::google_disconnect,
             list_calendars,
             set_calendar_selected,
             refresh_calendars,
             list_events,
-            google_last_refresh
+            google_last_refresh,
+            primary_calendar,
+            set_primary_calendar,
+            create_event,
+            update_event,
+            delete_event,
+            list_suggested_triggers,
+            accept_suggested_trigger,
+            dismiss_suggested_trigger,
+            run_connectors,
+            list_apps_for_selector,
+            set_task_tools_cmd,
+            list_task_tools_cmd,
+            launch_tool,
+            launch_task_tools,
+            set_app_class_cmd,
+            list_app_classes,
+            list_not_tool_candidates,
+            list_task_ignores,
+            get_style_bands,
+            set_style_bands,
+            get_default_event_secs,
+            set_default_event_secs,
+            refresh_app_usage
         ])
         .run(tauri::generate_context!())
         .expect("error while running nudge-app");
+}
+
+#[cfg(test)]
+mod import_e2e_tests {
+    use super::*;
+
+    // §7.2: the bound event runs Deadline → Deadline + duration (default 1 h).
+    #[test]
+    fn default_event_bounds_is_deadline_plus_duration() {
+        assert_eq!(default_event_bounds(1_784_000_000, 3600), (1_784_000_000, 1_784_003_600));
+        // A custom duration is honoured verbatim.
+        assert_eq!(default_event_bounds(100, 1800), (100, 1900));
+    }
+
+    // End-to-end CSV import: a mixed valid/broken blob parses to per-row verdicts,
+    // only the valid rows are converted server-side (form_to_task) and land via
+    // insert_batch — mirroring the filter-screen accept path (P4).
+    #[test]
+    fn mixed_csv_imports_only_valid_rows_end_to_end() {
+        let csv = "title,description,deadline,time_of_day,recur,task_type,estimate_minutes,mode
+\nShip report,Q3,2026-08-01T14:30,,mon wed fri,work,90,off_task
+\n,no title here,,,,,,
+\nErrand,,2026-08-02,,,errand,,
+\nBad row,,2026-13-01,25:00,funday,,notanint,
+";
+
+        // 1. Parse → verdicts (the filter screen input).
+        let rows = csv_import::parse_import(csv);
+        assert_eq!(rows.len(), 4);
+        let valid: Vec<_> = rows.into_iter().filter(|r| r.valid).collect();
+        assert_eq!(valid.len(), 2, "only Ship report + Errand are importable");
+
+        // 2. Server-side re-validation → Task (the import_tasks core).
+        let tasks: Vec<Task> = valid
+            .into_iter()
+            .map(|r| form_to_task(r.form).expect("valid row converts"))
+            .collect();
+
+        // 3. Batch insert into a temp DB (one transaction).
+        let mut p = std::env::temp_dir();
+        p.push(format!("nudge-app-import-e2e-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let mut store = Store::open_at(p.clone()).unwrap();
+        let ids = store.insert_batch(&tasks).unwrap();
+        assert_eq!(ids.len(), 2);
+
+        let stored = store.list().unwrap();
+        assert_eq!(stored.len(), 2);
+        let ship = stored.iter().find(|t| t.title == "Ship report").unwrap();
+        assert_eq!(ship.minutes, Some(14 * 60 + 30)); // derived from deadline time
+        assert_eq!(ship.estimate_minutes, Some(90));
+        assert_eq!(ship.task_source, TriggerSource::Manual); // forced downstream
+        let errand = stored.iter().find(|t| t.title == "Errand").unwrap();
+        assert!(errand.deadline.is_some());
+        assert_eq!(errand.minutes, None); // date-only deadline
+
+        drop(store);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // End-to-end Bulk Upload (PLAN-bulk-upload.md §7 P6): a mixed .xlsx across two
+    // groups + one blank-group row + a deliberate title dup + a deliberate deadline
+    // dup drives the exact bodies of validate_bulk_upload then confirm_bulk_upload
+    // (read_spreadsheet → parse_import → dedup_rows; then form_to_task → try_reserve
+    // → insert_bulk), asserting the report partition AND the DB end-state
+    // (task rows, resolved project_ids, auto-created hierarchy, one unfiled task).
+    #[test]
+    fn mixed_xlsx_bulk_upload_end_to_end() {
+        use rust_xlsxwriter::Workbook;
+
+        // --- Build the mixed .xlsx blob (the file a user would upload). ---------
+        let header = [
+            "project_group", "project", "title", "description", "deadline",
+            "time_of_day", "recur", "task_type", "estimate_minutes", "mode",
+        ];
+        // (group, project, title, deadline) — the fields that decide the outcome.
+        let data: [(&str, &str, &str, &str); 6] = [
+            ("Company Work", "Q3 Launch", "Send revised budget", "2026-07-24"), // new
+            ("Company Work", "Q3 Launch", "Draft launch announcement", "2026-07-27"), // new
+            ("Research Group", "Grant Proposal", "Write methods section", "2026-08-03"), // new
+            ("", "", "Read transformer scaling paper", ""), // new, unfiled, empty deadline
+            ("Company Work", "Q3 Launch", "send revised budget", "2026-07-24"), // EXACT dup of row1 (NOCASE title + same deadline)
+            ("Research Group", "Grant Proposal", "Collect co-author CVs", "2026-07-24"), // same deadline as row1, different title → still new
+        ];
+        let mut wb = Workbook::new();
+        let ws = wb.add_worksheet();
+        for (c, h) in header.iter().enumerate() {
+            ws.write_string(0, c as u16, *h).unwrap();
+        }
+        for (r, (g, p, t, d)) in data.iter().enumerate() {
+            let row = (r + 1) as u32;
+            ws.write_string(row, 0, *g).unwrap();
+            ws.write_string(row, 1, *p).unwrap();
+            ws.write_string(row, 2, *t).unwrap();
+            ws.write_string(row, 4, *d).unwrap();
+        }
+        let bytes = wb.save_to_buffer().unwrap();
+
+        // --- A fresh temp DB standing in for the machine store. ----------------
+        let mut path = std::env::temp_dir();
+        path.push(format!("nudge-app-bulk-e2e-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = Store::open_at(path.clone()).unwrap();
+
+        // === validate_bulk_upload body =========================================
+        let text = csv_import::read_spreadsheet(&bytes, "xlsx").unwrap();
+        let rows = csv_import::parse_import(&text);
+        assert_eq!(rows.len(), 6, "six data rows parsed");
+        let mut existing = existing_keys(&store).unwrap(); // empty DB snapshot
+        let outcome = csv_import::dedup_rows(rows, &mut existing);
+
+        // Report partition (§5 exact-pair rule): 5 new-unique, 1 ignored — only
+        // the row whose title AND deadline both match an existing task is a dup.
+        // The same-deadline-different-title row (Collect co-author CVs) stays new.
+        assert_eq!(outcome.new_rows.len(), 5, "rows 1-4 + 6 are new-unique");
+        assert_eq!(outcome.ignored.len(), 1, "only the exact-pair row is a dup");
+        let exact_dup = &outcome.ignored[0];
+        assert!(
+            exact_dup.row.form.title.eq_ignore_ascii_case("send revised budget"),
+            "exact-pair dup row reported: {}",
+            exact_dup.row.form.title
+        );
+        assert!(
+            exact_dup.reason.contains("already exists"),
+            "reason: {}",
+            exact_dup.reason
+        );
+        assert!(
+            outcome
+                .new_rows
+                .iter()
+                .any(|r| r.form.title == "Collect co-author CVs"),
+            "same-deadline/different-title row survives as new"
+        );
+
+        // === confirm_bulk_upload body (only the new_rows, as the UI would) ======
+        let mut confirm = existing_keys(&store).unwrap(); // fresh live snapshot
+        let mut items: Vec<db::BulkInsert> = Vec::new();
+        for row in outcome.new_rows {
+            let group = row.project_group.clone();
+            let project = row.project.clone();
+            let task = form_to_task(row.form).expect("new row converts");
+            if !confirm.try_reserve(&task.title, task.deadline) {
+                continue; // server-side re-dedup (none expected here)
+            }
+            items.push(db::BulkInsert { task, group, project });
+        }
+        assert_eq!(items.len(), 5, "all 5 new rows survive re-dedup");
+        let ids = store.insert_bulk(&items).unwrap();
+        assert_eq!(ids.len(), 5, "5 tasks written in one transaction");
+
+        // === DB end-state (reopen the file to read project_id + hierarchy) =====
+        let stored = store.list().unwrap();
+        assert_eq!(stored.len(), 5);
+        drop(store);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let groups: i64 = conn
+            .query_row("SELECT COUNT(*) FROM project_groups", [], |r| r.get(0))
+            .unwrap();
+        let projects: i64 = conn
+            .query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((groups, projects), (2, 2), "two groups + two projects auto-created");
+
+        let pid = |title: &str| -> Option<i64> {
+            conn.query_row(
+                "SELECT project_id FROM tasks WHERE title = ?1",
+                [title],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        // The filed tasks each carry a non-NULL project_id; tasks under the same
+        // group+project share it; the unfiled row is NULL.
+        let budget = pid("Send revised budget");
+        let announce = pid("Draft launch announcement");
+        let methods = pid("Write methods section");
+        let cvs = pid("Collect co-author CVs");
+        assert!(budget.is_some() && announce.is_some() && methods.is_some());
+        assert_eq!(budget, announce, "same Company Work → Q3 Launch project");
+        assert_ne!(budget, methods, "different group/project → different id");
+        assert_eq!(methods, cvs, "same Research Group → Grant Proposal project");
+        assert_eq!(pid("Read transformer scaling paper"), None, "blank group ⇒ unfiled");
+
+        drop(conn);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // §7.2 event-click Add Task: a task created from an existing event adopts that
+    // event's id as its binding (form_to_task + preset gcal_event_id), and the
+    // binding survives the insert (insert_and_reload would NOT auto-tie a second
+    // event since gcal_event_id is already Some). Mirrors add_task_for_event's core.
+    #[test]
+    fn add_task_for_event_binds_to_existing_event() {
+        let form = NewTaskForm {
+            title: "Prep for standup".into(),
+            desc: String::new(),
+            deadline: Some(1_784_000_000),
+            task_type: String::new(),
+            minutes: None,
+            recur: "once".into(),
+            mode_override: None,
+            estimate_minutes: None,
+        };
+        let mut task = form_to_task(form).unwrap();
+        task.gcal_event_id = Some("evt-existing-99".into());
+        // insert_and_reload only auto-ties when the binding is None — already Some here.
+        assert!(task.gcal_event_id.is_some());
+
+        let mut path = std::env::temp_dir();
+        path.push(format!("nudge-app-addforevent-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let store = Store::open_at(path.clone()).unwrap();
+        let id = store.insert(&task).unwrap();
+
+        let stored = store.get(id).unwrap().unwrap();
+        assert_eq!(stored.gcal_event_id.as_deref(), Some("evt-existing-99"));
+        assert_eq!(stored.title, "Prep for standup");
+        assert_eq!(stored.task_source, TriggerSource::Manual);
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
 }

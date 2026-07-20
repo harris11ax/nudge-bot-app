@@ -5,6 +5,7 @@ pub mod escalate;
 pub mod rules;
 pub mod schedule;
 pub mod state;
+pub mod task_window;
 pub mod tasks;
 
 /// Seconds since Unix epoch, injected by the caller (svc owns the clock).
@@ -27,6 +28,23 @@ pub enum EdgeKind {
     SnoozeExpiry,
     /// A post-ack check-in came due ("still on X?").
     CheckIn,
+    /// A STARTED-mode AW sample fell due (§6.1): probe the foreground app to see
+    /// whether the user is still on-task. Armed *only* while `Started`-unpaused —
+    /// structurally absent (`sample_at == None`) everywhere else, so an idle or
+    /// paused machine has no sample edge to wake on (zero-polling, PLAN §7).
+    Sample,
+    /// A §6.4 on-task check-in tick fell due: if the foreground app is off
+    /// EVERY due-window task's tools, ask "what are you working on?"; else
+    /// silently re-arm the next tick (the cadence is a floor, not a metronome).
+    OnTaskCheckIn,
+    /// A tray Pause (§6.6) expired: resume supervision. While paused this is the
+    /// *only* edge armed — the schedule edge is deliberately not merged, so
+    /// nothing can fire mid-pause; it is recomputed fresh on resume.
+    PauseExpiry,
+    /// A §6.5 Take-a-break expired: resume the task. Same single-edge silencing
+    /// as `PauseExpiry`, kept distinct so the outcomes log can tell a chosen
+    /// break from a tray pause.
+    BreakExpiry,
 }
 
 impl EdgeKind {
@@ -39,6 +57,10 @@ impl EdgeKind {
             EdgeKind::EscalationStep => "escalation_step",
             EdgeKind::SnoozeExpiry => "snooze_expiry",
             EdgeKind::CheckIn => "check_in",
+            EdgeKind::Sample => "sample",
+            EdgeKind::OnTaskCheckIn => "ontask_check_in",
+            EdgeKind::PauseExpiry => "pause_expiry",
+            EdgeKind::BreakExpiry => "break_expiry",
         }
     }
 }

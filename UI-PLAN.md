@@ -40,19 +40,20 @@ Both modes: never steal focus, never block input, everything logged to sessions.
 └──────┴──────────────────────────────┴───────────────┘
 ```
 
-- **Left sidebar:** collapsible (icon-only when collapsed). Tabs: Planner, Calendar, Triggers, Settings, Log.
+- **Left sidebar:** collapsible (icon-only when collapsed). Tabs: Planner, Calendar, Tasks, Settings, Log. (Nomenclature: the former "Triggers" entity/tab is renamed **Task/Tasks** throughout the app — see §7.1.)
 - **Right sidebar:** always visible, user-resizable width (persisted). Content = to-do list; **next deadline pinned at top** (name, countdown, one-click Start). Below: compact task list sorted by deadline.
 - **Content area:** renders active tab.
 
 ### Planner tab
 - **Week list:** tasks with deadline ≤ 7 days OR missed deadline (missed styled distinctly, sorted first).
 - **Variable list:** all other tasks, filters: time range (2 weeks / 1 month / custom), keyword search over title+description, checkbox task-type filters. Filter state persisted.
-- Task page (opened by notification click or list click): title, description, deadline, type, trigger(s), history from sessions.db.
+- Task page (opened by notification click or list click): title, description, **Deadline**, type, task(s), history from sessions.db. Includes **Launch tools** controls (§7.4).
 
-### Triggers tab (low-friction creation)
-- One-line quick-add: `text @ time [recur]` parsed inline (e.g. "gym @ 17:30 mon,wed,fri"), plus a fallback form. One-time and recurring (daily/weekly/custom days).
-- Each trigger: mode override (auto / force-strong / force-soft), escalation on/off, check-in on/off.
-- **Import lane (future, background):** `trigger_source` field on every trigger (`manual | gmail | gcal | ...`) + a staging "Suggested triggers" inbox where connectors deposit candidates for one-click accept. Schema reserved now, connectors later.
+### Tasks tab (low-friction creation)
+Ordering (top → bottom): **Quick Add** first, then the task list, then **Suggested** last (§7.1).
+- **Quick Add (top):** one-line quick-add: `text @ Deadline [recur]` parsed inline (e.g. "gym @ 17:30 mon,wed,fri"), plus a fallback form. One-time and recurring (daily/weekly/custom days). The start-time field is labelled **Deadline** everywhere (§7.1).
+- Each task: mode override (auto / force-strong / force-soft), escalation on/off, check-in on/off.
+- **Suggested (bottom) / import lane:** `task_source` field on every task (`manual | gmail | gcal | ...`) + a staging **"Suggested"** inbox where connectors deposit candidates for one-click accept. A task already tied to a calendar Event is **excluded** from Suggested (§7.2).
 
 ### Calendar tab
 - Month/week views. Overlays: (a) events from multiple Google Calendars (read), (b) all tasks with deadlines (from rules/tasks db, distinct styling).
@@ -60,11 +61,12 @@ Both modes: never steal focus, never block input, everything logged to sessions.
 - Google API access (OAuth, token cache) lives entirely in nudge-app; svc never touches it. Offline = tasks still render, Google layers grey out.
 
 ### Settings tab
-- Notification mode tuning (per-mode colors, sounds, escalation ladder, on-task fade time), productive-app list for on/off-task classification, snooze defaults, AW endpoint, calendar account.
+- Notification mode tuning (per-mode colors, sounds, escalation ladder, on-task fade time), productive-app list for on/off-task classification, snooze defaults, AW endpoint.
+- **Tabbed Settings:** General, Tools (§6.2), Style (§6.9), and a dedicated **Calendar** tab (§7.3) holding all calendar/Google account settings (moved out of General).
 
 ## 3. Data Model Changes
 
-- Tasks graduate from `rules.toml` nudge entries to a `tasks` table in the DB (title, desc, deadline, type, recur spec, trigger mode, source, gcal_event_id nullable). rules.toml keeps global config (anchor style, ladders, snooze defaults). svc reads tasks read-only; app is the writer; reload event signals changes.
+- Tasks graduate from `rules.toml` nudge entries to a `tasks` table in the DB (title, desc, deadline, type, recur spec, mode, `task_source` (renamed from `trigger_source`, §7.1), `gcal_event_id` nullable = Event binding §7.2). `task_tools` rows carry an optional `url` for web tools (§7.4 launch). rules.toml keeps global config (anchor style, ladders, snooze defaults). svc reads tasks read-only; app is the writer; reload event signals changes.
 - sessions.db additions: notification mode fired, on/off-task classification result, click-throughs.
 
 ## 4. Build Phasing
@@ -132,3 +134,31 @@ Applies everywhere "due ≤48 h" appeared (§6.4, §6.5, sidebar top). Sooner de
 - Row color encodes completion level (`logged/estimate` bands); band colors customizable in a new **Settings → Style tab**.
 - Not-started default: white background, black outline. Outline turns **red** when not started and <24 h remain to deadline.
 - **Modularity (load-bearing):** selection/sort/window logic = pure function in nudge-core (`task_window.rs`: `(tasks, now, config) -> ordered display list + style class per row`), shared by svc popups and nudge-app; presentation = one reusable frontend component (`TaskListPanel`) + one svc render routine consuming the same output. Expected to be revised often — keep zero business logic in the rendering layer.
+
+## 7. Addendum (2026-07-18): Tasks nomenclature, Task↔Event binding, Settings/Calendar, Tools launch & attribution
+
+### 7.1 Nomenclature: Trigger → Task, start time → Deadline
+- **Global rename:** the user-facing entity/tab formerly called **Trigger/Triggers** is now **Task/Tasks** everywhere it surfaces (left-sidebar tab, headers, form labels, notification copy, Suggested inbox). Framing: the app's job is to get the user's attention and remind them to complete their **Tasks**.
+- **Deadline label:** the field previously shown as the task's *start time* is labelled **Deadline** consistently in every surface (Quick Add, task page, calendar, sidebar, notifications). **Decision (2026-07-18): field-semantics change, not display-only** — the primary user-facing task time is the hard `deadline` (unix, already the sole key of `display_list`); the fire `minutes` is *derived* from it (mirrors step 4 deadline-only tasks + CSV import). Forms bind to `deadline`; `minutes` follows.
+- **Status (session 58):** backend done — DB column / DTO-JSON API / `Task` field `trigger_source`→`task_source` (both crates byte-identical, back-compat `RENAME COLUMN` migration + legacy-DB test; internal `TriggerSource` type unchanged). Remaining: Svelte relabel + Deadline-first form binding + Tasks-tab reorder.
+- **Code note (non-user-facing):** internal timing terms may keep "trigger edge"/"firing edge" since those name the scheduler edge, not the entity. DB/API: rename the user-facing field concept `trigger_source` → `task_source`; keep migration back-compat. This is a rename-only pass (Contractor), no behavior change.
+- **Tasks tab ordering:** **Quick Add** pinned at **top**; **Suggested** moved to the **bottom** (was inline "Import lane"). Task list sits between them.
+
+### 7.2 Task ↔ Calendar Event binding (bidirectional)
+- **Auto-tie on create:** creating a Task automatically creates a bound Calendar Event on the designated primary Google Calendar and syncs it. **Default event time = Deadline + 1 h** (event start = Task Deadline, event end = Deadline + 1 h); user may edit after. Binding stored via existing `gcal_event_id` (nullable) on the task row.
+- **Edit propagation:** modifying a Task updates its bound Event (title, time, deadline) and pushes the change to the applicable Google Calendar. One writer (nudge-app) on the primary calendar only, per §57–60 write-path rule.
+- **Suggested exclusion:** a Task already tied to an Event does **not** appear in the Suggested list (§7.1) — it is already committed, not a candidate.
+- **Event-click menu (calendar):** clicking an event on the calendar prompts a 3-choice menu: **Add Task** / **Edit Event** / **Delete Event**.
+  - **Add Task** → opens **Quick Add** with the Event's fields auto-filled (title, time→Deadline, calendar source); user completes any missing fields, and the new Task binds to that Event.
+  - **Edit Event** / **Delete Event** act on the Event (and, if bound, keep the linked Task consistent — deleting an event bound to a task prompts whether to also clear the binding).
+
+### 7.3 Settings: dedicated Calendar tab
+- Split calendar/Google settings out of General into their own **Settings → Calendar** tab: Google account/OAuth connection & reconnect, designated primary (write) calendar, visible read calendars, refresh policy (§6.7) & last-refreshed timestamp / manual Refresh, default event duration (default 1 h, §7.2), and Suggested-sync toggles.
+
+### 7.4 Tools: "Unknown" attribution, per-website resolution, launch-from-task
+- **What "Unknown" is:** the Tools usage list is built from AW window buckets keyed on the `app` field (`aw_query.rs`, exe name). AW's Windows window-watcher emits **`unknown`** for the foreground app whenever it cannot resolve the process — secure desktop / lock screen, UAC / elevated windows the watcher can't read, and watcher gaps. That time is **not a real process**, which is why no 36 h process appears in the ActivityWatch dashboard (≈24 min/day of lock/secure-desktop time over the 90-day window aggregates to ~36 h). **Fix:** relabel this bucket **"Unknown (system / lock screen)"**, exclude it from selectors and Not-Tools recommendations by default (recoverable via "show hidden"), and never surface it as an attachable tool.
+- **Per-website resolution inside browsers:** for browser exes (`brave.exe`, `chrome.exe`, `msedge.exe`, `firefox.exe`), attribute usage to the **actual site** rather than the browser. Source the host from the AW web-watcher bucket (`aw-watcher-web` browser extension, `url`/`title` fields) when present; fall back to the window title's host. Tools then list e.g. `brave.exe → github.com` as distinct, selectable entries. Budget-safe: parsing happens at the existing cache-refresh cadence (§6.7), no new sampling.
+- **Launch a tool from a task:** on the task page, each attached tool gets a **Launch** control (and a "Launch all" for the task's tool set):
+  - **Websites** → open the exact URL required for the task in the default/associated browser (bound URL stored on the `task_tools` row for web tools).
+  - **Windows applications** → `ShellExecute` the exe (reuses the §6.5 launch path; skip if already running).
+  - Runs on-demand from the task page (not just at off-task check-ins), so viewing a task can spin up everything needed to start it.

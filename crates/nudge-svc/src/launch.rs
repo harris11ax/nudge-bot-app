@@ -108,9 +108,94 @@ unsafe fn focus_and_notify(hwnd: HWND, task_id: Option<i64>) {
     );
 }
 
+/// Tier-C row switch (§6.5/P4): launch the picked task's tools that aren't
+/// already running. Tool names are exe filenames (`task_tools.app_name`, the
+/// same form AW reports); `ShellExecuteW` resolves them via PATH / App Paths,
+/// so a bare "code.exe" launches without a stored full path. Best-effort per
+/// exe — a tool that fails to resolve is logged and skipped, never a crash.
+pub fn launch_tools(db: &crate::persist::Db, task_id: i64) {
+    let tools: Vec<String> = db
+        .task_tools(task_id)
+        .into_iter()
+        .filter(|(_, kind)| kind == "tool")
+        .map(|(name, _)| name)
+        .collect();
+    for exe in tools_to_launch(&tools, &running_exes()) {
+        let ret = unsafe {
+            windows::Win32::UI::Shell::ShellExecuteW(
+                HWND::default(),
+                &HSTRING::from("open"),
+                &HSTRING::from(exe.as_str()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+            )
+        };
+        // Per ShellExecute contract, values <= 32 are error codes.
+        if ret.0 as isize <= 32 {
+            eprintln!("launch_tools: could not launch {exe} (code {})", ret.0 as isize);
+        }
+    }
+}
+
+/// The pure filter behind [`launch_tools`]: which of `tools` are not in
+/// `running` (case-insensitive exe-name compare, mirroring the on-task
+/// compares)? Split out so the skip-running rule is unit-testable without a
+/// process snapshot.
+fn tools_to_launch(tools: &[String], running: &[String]) -> Vec<String> {
+    tools
+        .iter()
+        .filter(|t| !running.iter().any(|r| r.eq_ignore_ascii_case(t)))
+        .cloned()
+        .collect()
+}
+
+/// Exe names of all running processes (Toolhelp snapshot). Empty on failure —
+/// which errs toward launching, matching "the user asked to switch".
+fn running_exes() -> Vec<String> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    let mut out = Vec::new();
+    let snap = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
+        Ok(h) => h,
+        Err(_) => return out,
+    };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    if unsafe { Process32FirstW(snap, &mut entry) }.is_ok() {
+        loop {
+            let len = entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
+            out.push(String::from_utf16_lossy(&entry.szExeFile[..len]));
+            if unsafe { Process32NextW(snap, &mut entry) }.is_err() {
+                break;
+            }
+        }
+    }
+    unsafe {
+        let _ = windows::Win32::Foundation::CloseHandle(snap);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // D.3: the switch launches only what isn't already running, matching exe
+    // names case-insensitively.
+    #[test]
+    fn launch_filter_skips_running_exes() {
+        let tools = vec!["code.exe".to_string(), "word.exe".into(), "fig.exe".into()];
+        let running = vec!["CODE.EXE".to_string(), "explorer.exe".into()];
+        assert_eq!(tools_to_launch(&tools, &running), vec!["word.exe", "fig.exe"]);
+        // Nothing running (snapshot failed) → launch everything asked for.
+        assert_eq!(tools_to_launch(&tools, &[]).len(), 3);
+        assert!(tools_to_launch(&[], &running).is_empty());
+    }
 
     #[test]
     fn args_with_task() {

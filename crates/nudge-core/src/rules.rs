@@ -61,6 +61,29 @@ pub struct Escalation {
     pub snooze_secs: i64,
     /// Delay after Start before a "still on it?" check-in; 0 disables check-ins.
     pub checkin_after_secs: i64,
+    /// STARTED-mode AW sampling cadence in seconds (§6.1); 0 disables sampling.
+    /// Off by default, mirroring `checkin_after_secs` — an existing rules.toml
+    /// keeps its pre-Phase-3 behaviour until the user opts in.
+    pub sample_secs: i64,
+    /// How long a *continuous* off-task run must last before the drift check-in
+    /// fires (§6.5). Measured from the first off-task sample, so with the default
+    /// cadence it takes two consecutive off-task samples to cross.
+    pub off_task_secs: i64,
+    /// §6.4 on-task check-in floor cadence in seconds; 0 disables it. A tick
+    /// that lands while the user is on ANY due-window task's tools is silently
+    /// skipped, so this is the *minimum* spacing between prompts, not a
+    /// metronome. User-configurable (Settings, Tier B P3); set to a small
+    /// positive number of seconds in a scratch config to test.
+    pub ontask_checkin_secs: i64,
+    /// How long "Take a break" from the §6.5 check-in silences everything.
+    pub break_secs: i64,
+    /// How long a tray Pause silences everything (§6.6).
+    pub pause_secs: i64,
+    /// Duration for the tray Pause submenu's "Custom" item (§6.6 step 5): a
+    /// free-input surface would need a new Win32 dialog, so instead the user
+    /// edits this value in rules.toml and picks "Custom" from the existing
+    /// submenu — no UI beyond a menu item, reusing the live "Reload rules" path.
+    pub custom_pause_secs: i64,
 }
 
 impl Default for Escalation {
@@ -71,6 +94,12 @@ impl Default for Escalation {
             l2_repeat_secs: 10 * 60,
             snooze_secs: 10 * 60,
             checkin_after_secs: 0,
+            sample_secs: 0,
+            off_task_secs: 5 * 60,
+            ontask_checkin_secs: 30 * 60,
+            break_secs: 10 * 60,
+            pause_secs: 30 * 60,
+            custom_pause_secs: 60 * 60,
         }
     }
 }
@@ -88,6 +117,20 @@ impl Escalation {
     /// Check-in delay as the state machine wants it: `None` when disabled.
     pub fn checkin(&self) -> Option<i64> {
         (self.checkin_after_secs > 0).then_some(self.checkin_after_secs)
+    }
+
+    /// Sampling cadence as the state machine wants it: `None` when disabled, in
+    /// which case `Started` never carries a `sample_at` and no sample edge can be
+    /// armed at all (§6.1 zero-polling guarantee).
+    pub fn sample(&self) -> Option<i64> {
+        (self.sample_secs > 0).then_some(self.sample_secs)
+    }
+
+    /// §6.4 on-task check-in cadence as the state machine wants it: `None` when
+    /// disabled, in which case `Started` never carries an `ontask_at` and no
+    /// on-task edge can be armed at all.
+    pub fn ontask(&self) -> Option<i64> {
+        (self.ontask_checkin_secs > 0).then_some(self.ontask_checkin_secs)
     }
 }
 
@@ -159,7 +202,16 @@ pub fn parse(toml_src: &str) -> Result<Rules, RulesError> {
         }
     }
     let esc = &rules.escalation;
-    if esc.l1_after_secs < 0 || esc.l2_after_secs < 0 || esc.snooze_secs < 0 {
+    if esc.l1_after_secs < 0
+        || esc.l2_after_secs < 0
+        || esc.snooze_secs < 0
+        || esc.sample_secs < 0
+        || esc.off_task_secs < 0
+        || esc.ontask_checkin_secs < 0
+        || esc.break_secs < 0
+        || esc.pause_secs < 0
+        || esc.custom_pause_secs < 0
+    {
         return Err(RulesError::Invalid("escalation: negative duration".into()));
     }
     if esc.l1_after_secs > esc.l2_after_secs {
@@ -213,6 +265,28 @@ text = "t"
         assert_eq!(l.l2_after_secs, 600);
         assert_eq!(r.escalation.snooze_secs, 600);
         assert_eq!(r.escalation.checkin(), None); // check-ins off by default
+        assert_eq!(r.escalation.sample(), None); // sampling off by default
+        assert_eq!(r.escalation.off_task_secs, 300);
+    }
+
+    #[test]
+    fn escalation_block_enables_sampling() {
+        let src = format!("{OK}\n[escalation]\nsample_secs = 300\noff_task_secs = 600\n");
+        let r = parse(&src).unwrap();
+        assert_eq!(r.escalation.sample(), Some(300));
+        assert_eq!(r.escalation.off_task_secs, 600);
+        // A negative cadence is rejected like every other duration.
+        assert!(parse(&format!("{OK}\n[escalation]\nsample_secs = -1\n")).is_err());
+    }
+
+    #[test]
+    fn custom_pause_secs_defaults_and_overrides() {
+        let r = parse(OK).unwrap();
+        assert_eq!(r.escalation.custom_pause_secs, 3600);
+        let src = format!("{OK}\n[escalation]\ncustom_pause_secs = 900\n");
+        let r = parse(&src).unwrap();
+        assert_eq!(r.escalation.custom_pause_secs, 900);
+        assert!(parse(&format!("{OK}\n[escalation]\ncustom_pause_secs = -1\n")).is_err());
     }
 
     #[test]
@@ -223,6 +297,15 @@ text = "t"
         assert_eq!(r.escalation.checkin(), Some(1800));
         // Unspecified ladder fields keep their defaults.
         assert_eq!(r.escalation.ladder().l1_after_secs, 300);
+    }
+
+    #[test]
+    fn ontask_checkin_defaults_on_and_zero_disables() {
+        let r = parse(OK).unwrap();
+        assert_eq!(r.escalation.ontask(), Some(1800)); // §6.4: 30-min floor by default
+        let src = format!("{OK}\n[escalation]\nontask_checkin_secs = 0\n");
+        assert_eq!(parse(&src).unwrap().escalation.ontask(), None);
+        assert!(parse(&format!("{OK}\n[escalation]\nontask_checkin_secs = -1\n")).is_err());
     }
 
     #[test]

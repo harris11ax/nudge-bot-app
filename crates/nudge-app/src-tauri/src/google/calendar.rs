@@ -1,7 +1,9 @@
-//! Google Calendar REST, read side (10b): `calendarList.list` + `events.list`.
-//! Blocking `ureq`, same idiom as `oauth.rs`/`nudge-draft/anthropic.rs`. JSON
-//! parsing is split into pure, unit-tested helpers; the two network fns are
-//! thin wrappers (mirrors the `anthropic.rs` `build_body`/`extract_text` split).
+//! Google Calendar REST: `calendarList.list` + `events.list` (read, 10b),
+//! `events.insert`/`events.update` (write, 10c — primary calendar only, the
+//! caller in `lib.rs` enforces that restriction). Blocking `ureq`, same idiom
+//! as `oauth.rs`/`nudge-draft/anthropic.rs`. JSON parsing/building is split
+//! into pure, unit-tested helpers; the network fns are thin wrappers (mirrors
+//! the `anthropic.rs` `build_body`/`extract_text` split).
 
 use serde_json::Value;
 use std::time::Duration;
@@ -80,7 +82,103 @@ pub fn list_events(
     Ok(parse_events(&json))
 }
 
+/// `POST /calendars/{id}/events` — create a new event. Caller (`lib.rs`)
+/// restricts `calendar_id` to the app's chosen primary calendar (GOOGLE-PLAN.md:
+/// "write path: create/edit events on ONE designated primary Google Calendar
+/// only").
+pub fn create_event(
+    access_token: &str,
+    calendar_id: &str,
+    summary: &str,
+    start_unix: i64,
+    end_unix: i64,
+    all_day: bool,
+) -> Result<EventInfo, String> {
+    let url = format!(
+        "https://www.googleapis.com/calendar/v3/calendars/{}/events",
+        path_encode(calendar_id)
+    );
+    let resp = agent()
+        .post(&url)
+        .set("Authorization", &format!("Bearer {access_token}"))
+        .send_json(build_event_body(summary, start_unix, end_unix, all_day))
+        .map_err(|e| format!("events.insert request failed ({calendar_id}): {e}"))?;
+    let json: Value = resp
+        .into_json()
+        .map_err(|e| format!("bad events.insert response: {e}"))?;
+    parse_event(&json).ok_or_else(|| "events.insert: malformed response".to_string())
+}
+
+/// `PUT /calendars/{id}/events/{eventId}` — overwrite an existing event's
+/// summary/time. Same primary-only restriction as [`create_event`].
+pub fn update_event(
+    access_token: &str,
+    calendar_id: &str,
+    event_id: &str,
+    summary: &str,
+    start_unix: i64,
+    end_unix: i64,
+    all_day: bool,
+) -> Result<EventInfo, String> {
+    let url = format!(
+        "https://www.googleapis.com/calendar/v3/calendars/{}/events/{}",
+        path_encode(calendar_id),
+        path_encode(event_id)
+    );
+    let resp = agent()
+        .put(&url)
+        .set("Authorization", &format!("Bearer {access_token}"))
+        .send_json(build_event_body(summary, start_unix, end_unix, all_day))
+        .map_err(|e| format!("events.update request failed ({event_id}): {e}"))?;
+    let json: Value = resp
+        .into_json()
+        .map_err(|e| format!("bad events.update response: {e}"))?;
+    parse_event(&json).ok_or_else(|| "events.update: malformed response".to_string())
+}
+
+/// `DELETE /calendars/{id}/events/{eventId}` — remove an event from Google.
+/// Returns `204 No Content` on success (no body to parse). A `410 Gone` means
+/// the event was already deleted upstream, which we treat as success so a stale
+/// local row can still be reconciled away. Same primary-only restriction as
+/// [`create_event`].
+pub fn delete_event(access_token: &str, calendar_id: &str, event_id: &str) -> Result<(), String> {
+    let url = format!(
+        "https://www.googleapis.com/calendar/v3/calendars/{}/events/{}",
+        path_encode(calendar_id),
+        path_encode(event_id)
+    );
+    match agent()
+        .delete(&url)
+        .set("Authorization", &format!("Bearer {access_token}"))
+        .call()
+    {
+        Ok(_) => Ok(()),
+        // Already gone upstream — idempotent delete, not an error.
+        Err(ureq::Error::Status(410, _)) => Ok(()),
+        Err(e) => Err(format!("events.delete request failed ({event_id}): {e}")),
+    }
+}
+
 // --- pure helpers (unit-tested) ---
+
+/// Build the `events.insert`/`events.update` request body. All-day events use
+/// `{"date": "YYYY-MM-DD"}` per GCal's exclusive-end-date convention (caller
+/// passes `end_unix` already one day past the last included day); timed
+/// events use RFC3339 `dateTime`, matching what [`parse_time_point`] reads back.
+fn build_event_body(summary: &str, start_unix: i64, end_unix: i64, all_day: bool) -> Value {
+    let (start, end) = if all_day {
+        (
+            serde_json::json!({ "date": unix_to_date_only(start_unix) }),
+            serde_json::json!({ "date": unix_to_date_only(end_unix) }),
+        )
+    } else {
+        (
+            serde_json::json!({ "dateTime": unix_to_rfc3339(start_unix) }),
+            serde_json::json!({ "dateTime": unix_to_rfc3339(end_unix) }),
+        )
+    };
+    serde_json::json!({ "summary": summary, "start": start, "end": end })
+}
 
 fn parse_calendar_list(v: &Value) -> Vec<CalendarInfo> {
     v.get("items")
@@ -252,6 +350,13 @@ fn parse_offset_digits(hm: &str) -> Option<i64> {
     Some(h * 3600 + m * 60)
 }
 
+/// Format a unix timestamp as a bare `YYYY-MM-DD` date (UTC day boundary),
+/// for all-day event `start`/`end` bodies.
+fn unix_to_date_only(unix: i64) -> String {
+    let (y, m, d) = civil_from_days(unix.div_euclid(86400));
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 /// Format a unix timestamp as UTC RFC3339 for `timeMin`/`timeMax` query params.
 fn unix_to_rfc3339(unix: i64) -> String {
     let days = unix.div_euclid(86400);
@@ -395,5 +500,28 @@ mod tests {
             path_encode("foo@group.calendar.google.com"),
             "foo%40group.calendar.google.com"
         );
+    }
+
+    #[test]
+    fn build_event_body_timed_uses_date_time() {
+        let body = build_event_body("Standup", 1_784_000_000, 1_784_003_600, false);
+        assert_eq!(body["summary"], "Standup");
+        assert!(body["start"]["dateTime"].is_string());
+        assert!(body["start"].get("date").is_none());
+        assert!(body["end"]["dateTime"].is_string());
+    }
+
+    #[test]
+    fn build_event_body_all_day_uses_date() {
+        let body = build_event_body("Vacation", 1_784_000_000, 1_784_086_400, true);
+        assert!(body["start"]["date"].is_string());
+        assert!(body["start"].get("dateTime").is_none());
+        assert!(body["end"]["date"].is_string());
+    }
+
+    #[test]
+    fn unix_to_date_only_matches_civil_from_days() {
+        assert_eq!(unix_to_date_only(0), "1970-01-01");
+        assert_eq!(unix_to_date_only(86400), "1970-01-02");
     }
 }

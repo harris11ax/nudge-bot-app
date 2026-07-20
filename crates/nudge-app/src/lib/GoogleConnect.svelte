@@ -1,22 +1,65 @@
 <script>
   import { onMount } from "svelte";
-  import { googleStatus, googleConnect, listCalendars, setCalendarSelected } from "./api.js";
+  import {
+    googleStatus,
+    googleConnect,
+    googleDisconnect,
+    listCalendars,
+    setCalendarSelected,
+    primaryCalendar,
+    setPrimaryCalendar,
+  } from "./api.js";
 
   // 10a: OAuth plumbing (google/mod.rs + oauth.rs). 10b adds the per-calendar
-  // overlay checkboxes below, driving what the Calendar tab renders.
-  let status = $state("not_configured");
+  // overlay checkboxes below, driving what the Calendar tab renders. 10c adds
+  // the primary-calendar picker: the single calendar create/edit events write to.
+  let status = $state("loading");
   let connecting = $state(false);
   let error = $state("");
   let calendars = $state(/** @type {Array} */ ([]));
+  let primary = $state(/** @type {string | null} */ (null));
 
   async function load() {
-    status = await googleStatus();
-    if (status === "connected") await loadCalendars();
+    // Don't leave the default state on screen if the status call loses a
+    // launch-timing race — retry a few times, then surface the real error
+    // instead of the misleading "not_configured" message.
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        status = await googleStatus();
+        error = "";
+        if (status === "connected") {
+          await loadCalendars();
+          await loadPrimary();
+        }
+        return;
+      } catch (err) {
+        status = "loading";
+        error = String(err);
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
   }
 
   async function loadCalendars() {
     try {
       calendars = await listCalendars();
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
+  async function loadPrimary() {
+    try {
+      primary = await primaryCalendar();
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
+  async function pickPrimary(gcalId) {
+    try {
+      await setPrimaryCalendar(gcalId);
+      primary = gcalId;
     } catch (err) {
       error = String(err);
     }
@@ -35,6 +78,18 @@
     }
   }
 
+  async function disconnect() {
+    error = "";
+    try {
+      await googleDisconnect();
+      calendars = [];
+      primary = null;
+      await load();
+    } catch (err) {
+      error = String(err);
+    }
+  }
+
   async function toggle(c) {
     const next = !c.selected;
     try {
@@ -50,19 +105,40 @@
 
 <div class="card">
   <h2>Google</h2>
-  {#if status === "not_configured"}
+  {#if status === "loading"}
+    <p class="hint">Checking Google connection…</p>
+  {:else if status === "not_configured"}
     <p class="hint">
       No OAuth client configured. Create a Desktop-app OAuth client in Google Cloud Console, then
       save <code>{"{"}"client_id": "...", "client_secret": "..."{"}"}</code> to
       <code>%LOCALAPPDATA%\nudge-bot\google_client.json</code>.
     </p>
+  {:else if status === "misconfigured"}
+    <p class="hint">
+      <code>%LOCALAPPDATA%\nudge-bot\google_client.json</code> exists but couldn't be read as valid
+      JSON. It must contain exactly
+      <code>{"{"}"client_id": "...", "client_secret": "..."{"}"}</code> (or the Google-downloaded
+      <code>{"{"}"installed": {"{"}…{"}"}{"}"}</code> file), saved as plain UTF-8. Fix the file
+      contents and relaunch.
+    </p>
   {:else}
     <p class={status === "connected" ? "ok" : "hint"}>
       {status === "connected" ? "Connected" : "Not connected"}
     </p>
-    <button class="primary" onclick={connect} disabled={connecting}>
-      {connecting ? "Waiting for sign-in…" : status === "connected" ? "Reconnect" : "Connect Google"}
-    </button>
+    <div class="btn-row">
+      <button class="primary" onclick={connect} disabled={connecting}>
+        {connecting ? "Waiting for sign-in…" : status === "connected" ? "Reconnect" : "Connect Google"}
+      </button>
+      {#if status === "connected"}
+        <button class="ghost" onclick={disconnect} disabled={connecting}>Reset connection</button>
+      {/if}
+    </div>
+    {#if status === "connected"}
+      <p class="hint">
+        Gmail scan returning 403? Click <strong>Reset connection</strong>, then
+        <strong>Reconnect</strong> and approve the Gmail permission to refresh the granted scopes.
+      </p>
+    {/if}
     {#if status === "connected" && calendars.length > 0}
       <h3 class="cal-settings-h">Overlay on Calendar tab</h3>
       <ul class="cal-checklist">
@@ -73,6 +149,24 @@
               <span class="cal-swatch" style={c.bg_color ? `background:${c.bg_color}` : ""}></span>
               {c.summary || c.gcal_id}
               {#if c.is_primary}<span class="chip">primary</span>{/if}
+            </label>
+          </li>
+        {/each}
+      </ul>
+      <h3 class="cal-settings-h">Write target</h3>
+      <p class="hint">Event create/edit writes to exactly one calendar.</p>
+      <ul class="cal-checklist">
+        {#each calendars as c (c.gcal_id)}
+          <li>
+            <label>
+              <input
+                type="radio"
+                name="primary-calendar"
+                checked={primary === c.gcal_id}
+                onchange={() => pickPrimary(c.gcal_id)}
+              />
+              <span class="cal-swatch" style={c.bg_color ? `background:${c.bg_color}` : ""}></span>
+              {c.summary || c.gcal_id}
             </label>
           </li>
         {/each}

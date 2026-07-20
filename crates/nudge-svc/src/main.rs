@@ -3,6 +3,7 @@
 //! No async runtime, no thread pool, no background tick.
 
 mod aw_query;
+mod classify;
 mod draft;
 mod hotkey;
 mod launch;
@@ -11,10 +12,13 @@ mod persist;
 mod reload;
 mod shutdown;
 mod sound;
+mod tasklist;
 mod timers;
 mod tray;
 
-use nudge_core::state::{next, Effect, Event, State};
+use nudge_core::state::{next, CheckInKind, Effect, Event, State};
+use nudge_core::task_window::{display_list, LoggedMap, Progress, WindowCfg};
+use nudge_core::tasks::Task;
 
 /// Reject an AW snapshot whose latest afk event ended more than this long before
 /// `now` — a watcher that stopped can't vouch for "not-afk". Generous enough to
@@ -25,7 +29,86 @@ const CHECKIN_STALENESS_SECS: i64 = 180;
 /// pay for an AW probe — every other transition sees `Presence::Unknown`.
 fn checkin_due(state: State, now: i64, event: &Event) -> bool {
     matches!(event, Event::EdgeTimer(_) | Event::RulesReloaded(_))
-        && matches!(state, State::Started { checkin_at: Some(t) } if now >= t)
+        && matches!(state, State::Started { checkin_at: Some(t), .. } if now >= t)
+}
+
+/// Does the pending event land on a due STARTED sample edge (§6.1)? A sample edge
+/// only exists while a task is live and sampling is configured, so this is the one
+/// place drift detection costs an AW probe — there is no background tick to guard
+/// against, because outside `Started` there is no edge to fire.
+fn sample_due(state: State, now: i64, event: &Event) -> bool {
+    matches!(event, Event::EdgeTimer(_) | Event::RulesReloaded(_))
+        && matches!(state, State::Started { sample_at: Some(t), .. } if now >= t)
+}
+
+/// Does the pending event land on a due §6.4 on-task check-in tick? Only then
+/// does the svc pay for the union-of-all-tools compare — every other transition
+/// leaves `any_task_on_task` at its safe `true` default.
+fn ontask_due(state: State, now: i64, event: &Event) -> bool {
+    matches!(event, Event::EdgeTimer(_) | Event::RulesReloaded(_))
+        && matches!(state, State::Started { ontask_at: Some(t), .. } if now >= t)
+}
+
+/// Is the foreground app in the tool list of ANY task in the dynamic deadline
+/// window (§6.4 broadened compare)? `rows` are the `display_list` output — the
+/// same "due window" the check-in's list will show.
+///
+/// Mirrors [`foreground_on_task`]'s never-nag-on-no-signal reads: no foreground
+/// app (AW down) → `true`; no tool configured on any due task → fall back to
+/// the global productive-app list, and if that too is empty → `true`.
+fn any_task_on_task(
+    db: &persist::Db,
+    rules: &nudge_core::rules::Rules,
+    rows: &[nudge_core::task_window::Row],
+    app: Option<&str>,
+) -> bool {
+    let Some(app) = app else { return true };
+    let mut any_tools = false;
+    for r in rows {
+        let tools = db.task_tools(r.task_id);
+        if tools.is_empty() {
+            continue;
+        }
+        any_tools = true;
+        if tools.iter().any(|(name, _kind)| name.eq_ignore_ascii_case(app)) {
+            return true;
+        }
+    }
+    if !any_tools {
+        if rules.classify.productive_apps.is_empty() {
+            return true;
+        }
+        return rules.classify.mode(Some(app)) == nudge_core::Mode::OnTask;
+    }
+    false
+}
+
+/// Is the foreground app one of the live task's tools (§6.1 sample compare)?
+///
+/// Precedence: the task's own `task_tools` list, else the global
+/// `[classify] productive_apps` list — so sampling is useful before the per-task
+/// tools selector (Tier B) exists. An `ignore`-kind tool counts as on-task: it's a
+/// task-scoped transient the user already told us not to be nagged about.
+///
+/// Two cases deliberately read as on-task rather than drift: no foreground signal
+/// at all (AW down — PLAN §7 says treat no-data as on-task), and no configured
+/// notion of on-task anywhere (empty tool list *and* empty productive-app list),
+/// which would otherwise make every single app count as drift and nag forever.
+fn foreground_on_task(
+    db: &persist::Db,
+    rules: &nudge_core::rules::Rules,
+    task_id: Option<i64>,
+    app: Option<&str>,
+) -> bool {
+    let Some(app) = app else { return true };
+    let tools = task_id.map(|id| db.task_tools(id)).unwrap_or_default();
+    if tools.is_empty() {
+        if rules.classify.productive_apps.is_empty() {
+            return true;
+        }
+        return rules.classify.mode(Some(app)) == nudge_core::Mode::OnTask;
+    }
+    tools.iter().any(|(name, _kind)| name.eq_ignore_ascii_case(app))
 }
 
 /// Is a task-window prompt about to open (Idle → Prompting)? Mode is decided
@@ -38,9 +121,49 @@ fn taskstart_due(state: State, in_window: bool, event: &Event) -> bool {
         && matches!(event, Event::EdgeTimer(_) | Event::RulesReloaded(_))
 }
 
+/// Is a drift check-in on screen, i.e. could the very next event be the No that
+/// brings the task list up? Only then is the §6.5 list worth computing — the
+/// answer has to be ready before `next()` runs, and every other transition would
+/// be paying for a list nobody asked for.
+fn task_list_due(state: State) -> bool {
+    matches!(
+        state,
+        State::CheckIn { kind: CheckInKind::OffTask | CheckInKind::OnTask, .. }
+            | State::Choosing { .. }
+    )
+}
+
+/// Fold `secs` of on-task sample time into `remainder` (seconds carried since
+/// the last whole minute was flushed), returning how many whole minutes are
+/// now ready to persist. `remainder` is left holding whatever's left over.
+/// `sample_secs` can be shorter than 60s (fast test configs), so a naive
+/// `secs / 60` truncates to 0 every tick and testing configs never accrue
+/// anything — session-52 review finding c.
+fn accrue_logged_minutes(remainder: &mut i64, secs: i64) -> i64 {
+    *remainder += secs;
+    let whole_minutes = *remainder / 60;
+    *remainder %= 60;
+    whole_minutes
+}
+
+/// Per-task progress for `display_list`, read straight off the `tasks` rows the
+/// svc already loaded this wake (`logged_minutes` is the cache it maintains at
+/// sample edges, so no AW re-scan happens here).
+fn progress_map(tasks: &[Task]) -> LoggedMap {
+    tasks
+        .iter()
+        .filter_map(|t| {
+            Some((
+                t.id?,
+                Progress { logged: t.logged_minutes, estimate: t.estimate_minutes },
+            ))
+        })
+        .collect()
+}
+
 /// Executes effects emitted by the pure state machine. This is the only
 /// place OS resources are created/destroyed — paired per transition.
-fn run_effects(effects: Vec<Effect>, res: &mut Resources) {
+fn run_effects(effects: Vec<Effect>, now: i64, res: &mut Resources) {
     // A batch is one transition. The `ArmEdgeTimer` in it names the next edge the
     // svc will wake on; pre-scan it so the state row logged in the same batch can
     // record which kind was armed (routes ArmEdgeTimer `kind` into logging).
@@ -52,11 +175,36 @@ fn run_effects(effects: Vec<Effect>, res: &mut Resources) {
         match fx {
             // Render at the escalation level; update the live strip in place
             // (no destroy/recreate flicker) or create it on first show.
-            Effect::ShowPrompt { text, level, mode } => match &mut res.overlay {
-                Some(a) => a.update(&text, level, mode),
-                None => res.overlay = Some(overlay::Anchor::create(&text, level, mode, res.geom)),
+            Effect::ShowPrompt { text, level, mode, buttons } => match &mut res.overlay {
+                Some(a) => a.update(&text, level, mode, buttons),
+                None => {
+                    res.overlay =
+                        Some(overlay::Anchor::create(&text, level, mode, buttons, res.geom))
+                }
             },
             Effect::HidePrompt => drop(res.overlay.take()),
+            // Rows arrive fully selected/sorted/styled from `task_window`; the
+            // window below only paints them.
+            Effect::ShowTaskList { rows } => {
+                // Read fresh each time the list is shown (§6.9): the Style tab
+                // has no reload signal of its own, so this is the read point.
+                let bands = res
+                    .db
+                    .get_meta("style_bands")
+                    .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+                    .map(|raw| tasklist::parse_bands(&raw))
+                    .unwrap_or_default();
+                res.tasklist = Some(tasklist::TaskList::create(&rows, now, &bands))
+            }
+            Effect::HideTaskList => drop(res.tasklist.take()),
+            // Tools arrive snapshotted from the svc's own accumulator; task_id
+            // is consumed at the Event::Classify persistence seam, not here.
+            Effect::ShowClassify { tools, task_id: _ } => {
+                res.classify = Some(classify::Classify::create(&tools))
+            }
+            Effect::HideClassify => drop(res.classify.take()),
+            // Tier-C row switch: get the picked task's not-yet-running tools up.
+            Effect::LaunchTools { task_id } => launch::launch_tools(&res.db, task_id),
             Effect::PlaySound => sound::alert(),
             Effect::ArmEdgeTimer { at, kind: _ } => res.edge_timer.arm_absolute(at),
             Effect::LogEdge { entered, at, mode } => {
@@ -69,6 +217,10 @@ fn run_effects(effects: Vec<Effect>, res: &mut Resources) {
 
 struct Resources {
     overlay: Option<overlay::Anchor>,
+    /// The §6.5 task list, up only between a check-in's No and its resolution.
+    tasklist: Option<tasklist::TaskList>,
+    /// The Tier-B P2 classification screen, up only while `State::Classifying`.
+    classify: Option<classify::Classify>,
     /// Strip geometry from `[anchor]`; refreshed on every rules load so a live
     /// reload re-sizes/re-docks the next prompt.
     geom: overlay::AnchorGeom,
@@ -106,6 +258,8 @@ fn main() {
 
     let mut res = Resources {
         overlay: None,
+        tasklist: None,
+        classify: None,
         geom: overlay::AnchorGeom::from_rules(&rules.anchor),
         edge_timer: timers::EdgeTimer::new(),
         db: persist::Db::open(dirs_config().join("sessions.db")),
@@ -146,7 +300,21 @@ fn main() {
     }
     let (s, fx) = next(state, &boot_event, &ctx);
     state = s;
-    run_effects(fx, &mut res);
+    run_effects(fx, now.unix, &mut res);
+
+    // §6.4 "tools since the last check-in" accumulator (PLAN-step3 §1 option A):
+    // each due sample edge pushes the probed foreground app in; any check-in
+    // resolution clears it. Runtime scratch, deliberately not core state — P2's
+    // classification screen is the consumer; P1 only fills it.
+    let mut seen_tools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    // Sub-minute sample-cadence accrual remainder (session-52 finding c):
+    // `logged_minutes` is stored in whole minutes, but `sample_secs` can be
+    // shorter than 60s (e.g. fast test configs), so `secs / 60` truncates to 0
+    // and testing configs never accrue anything. Accrue in seconds here per
+    // task and only flush a whole minute into the persisted column when one
+    // has actually accumulated, carrying any leftover seconds forward.
+    let mut logged_secs_remainder: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
 
     // Message loop: wakes only on edge timer, quit event, hotkey, or tray
     // messages.
@@ -165,6 +333,16 @@ fn main() {
                 return;
             }
             timers::LoopSignal::Core(e) => e,
+            // The Pause submenu's pick rides the signal; "Default (rules)" and
+            // Break fall back to durations from rules, which the message loop
+            // doesn't hold — stamp them on here.
+            timers::LoopSignal::Pause(t, secs) => {
+                Event::PauseFor(t, secs.unwrap_or(rules.escalation.pause_secs))
+            }
+            timers::LoopSignal::PauseCustom(t) => {
+                Event::PauseFor(t, rules.escalation.custom_pause_secs)
+            }
+            timers::LoopSignal::Break(t) => Event::BreakFor(t, rules.escalation.break_secs),
             timers::LoopSignal::Reload => {
                 // Re-read rules.toml from disk. On any read/parse error, keep the
                 // running rules and skip the re-evaluation (last good config stays
@@ -188,7 +366,8 @@ fn main() {
         };
         // Re-read the `tasks` table each wake so app edits (signaled via reload)
         // take effect; wakes are edge-only, so this stays off the hot path.
-        let mut ctx = nudge_core::schedule::context_with_tasks(&rules, &res.db.tasks(), now);
+        let tasks = res.db.tasks();
+        let mut ctx = nudge_core::schedule::context_with_tasks(&rules, &tasks, now);
         // LLM draft override: inside a task window, a fresh `draft.txt` next-step
         // replaces the static window text (and thus the check-in text too). A
         // missing/blank/stale draft leaves the rules text untouched.
@@ -212,9 +391,111 @@ fn main() {
                 .unwrap_or_else(|| rules.classify.mode(aw_query::probe().app.as_deref()));
             eprintln!("nudge mode: {}", ctx.mode.label());
         }
+        // STARTED sampling (§6.1): at a due sample edge — and only there — read the
+        // foreground app so core can extend or reset the off-task run, then fold
+        // the elapsed cadence into `logged_minutes` when the user was on-task.
+        // That write is the one sanctioned svc→tasks exception (PLAN §3): a single
+        // UPDATE by rowid at an edge, so `logged_minutes` stays a lazily-refreshed
+        // cache and is never ticked.
+        if sample_due(state, now.unix, &event) {
+            let app = aw_query::probe().app;
+            if let Some(a) = &app {
+                seen_tools.insert(a.clone());
+            }
+            // Tier-C: `Started` carries the task it's bound to (a row pick may
+            // have switched away from the schedule window's task); fall back to
+            // the window's task for pre-pick/rules-only states.
+            let live_task = match state {
+                State::Started { task_id: Some(id), .. } => Some(id),
+                _ => ctx.window_task_id,
+            };
+            ctx.foreground_on_task =
+                foreground_on_task(&res.db, &rules, live_task, app.as_deref());
+            if ctx.foreground_on_task {
+                if let (Some(id), Some(secs)) = (live_task, ctx.sample_secs) {
+                    let remainder = logged_secs_remainder.entry(id).or_insert(0);
+                    let whole_minutes = accrue_logged_minutes(remainder, secs);
+                    if whole_minutes > 0 {
+                        let logged = tasks.iter().find(|t| t.id == Some(id)).map_or(0, |t| t.logged_minutes);
+                        res.db.set_logged_minutes(id, logged + whole_minutes as u32);
+                    }
+                }
+            }
+        }
+        // §6.4 on-task tick: at a due tick — and only there — compare the
+        // foreground app against the union of every due-window task's tools, so
+        // core can decide "drifted off everything → ask" vs "on something → stay
+        // quiet" without ever seeing an app name.
+        if ontask_due(state, now.unix, &event) {
+            let app = aw_query::probe().app;
+            if let Some(a) = &app {
+                seen_tools.insert(a.clone());
+            }
+            let rows = display_list(&tasks, &progress_map(&tasks), now.unix, &WindowCfg::default());
+            ctx.any_task_on_task = any_task_on_task(&res.db, &rules, &rows, app.as_deref());
+            // If the tick raises the §6.4 check-in, its picker IS the task list
+            // (`show_checkin` emits `ShowTaskList` for `OnTask`) — hand it the
+            // rows now, while they're in hand; state is still `Started` here so
+            // the `task_list_due` fill below can't cover this edge.
+            ctx.task_rows = rows;
+        }
+        // §6.5 list: computed here, by `task_window::display_list`, so that core
+        // can hand it straight to the render on a No without either end selecting,
+        // sorting or styling anything (UI-PLAN §6.9, the one owner).
+        if task_list_due(state) {
+            ctx.task_rows = display_list(&tasks, &progress_map(&tasks), now.unix, &WindowCfg::default());
+        }
+        // Classification (Tier-B P2): a check-in that can enter the classify
+        // screen — or the screen itself, on a reload re-emit — sees the
+        // accumulator snapshot; everywhere else it stays empty so the common
+        // transition pays nothing.
+        if matches!(
+            state,
+            State::CheckIn { kind: CheckInKind::OffTask | CheckInKind::OnTask, .. }
+                | State::Classifying { .. }
+        ) {
+            ctx.classify_tools = seen_tools.iter().cloned().collect();
+        }
+        // Persist a routed tool (the svc is the writer; core only acknowledges).
+        // Tool/Ignore go to the classifying task's list; NotTool is global.
+        if let (State::Classifying { task_id, .. }, Event::Classify { app_name, choice, .. }) =
+            (state, &event)
+        {
+            match choice {
+                nudge_core::state::ClassifyChoice::Tool => {
+                    res.db.add_task_tool(task_id, app_name, "tool")
+                }
+                nudge_core::state::ClassifyChoice::Ignore => {
+                    res.db.add_task_tool(task_id, app_name, "ignore")
+                }
+                nudge_core::state::ClassifyChoice::NotTool => {
+                    res.db.set_app_class(app_name, "not_tool")
+                }
+            }
+        }
+        let asking = |s: State| {
+            matches!(
+                s,
+                State::CheckIn { .. } | State::Choosing { .. } | State::Classifying { .. }
+            )
+        };
+        let was_asking = asking(state);
+        let was_paused = matches!(state, State::Paused { .. });
         let (s, fx) = next(state, &event, &ctx);
         state = s;
-        run_effects(fx, &mut res);
+        // §6.6: the tray icon mirrors paused state; only touched on the flip so
+        // the common transition doesn't re-set an unchanged icon.
+        let now_paused = matches!(state, State::Paused { .. });
+        if now_paused != was_paused {
+            tray.set_paused(now_paused);
+        }
+        // A check-in resolved (answered, timed out, or silenced) — including its
+        // classification tail: the "since the last check-in" window restarts, so
+        // the accumulator empties with it.
+        if was_asking && !asking(state) {
+            seen_tools.clear();
+        }
+        run_effects(fx, now.unix, &mut res);
     });
 
     // Loop returned (tray Quit, quit event, or WM_QUIT). Tear down OS resources
@@ -228,4 +509,239 @@ fn main() {
 fn dirs_config() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA"))
         .join("nudge-bot")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RULES_BARE: &str = "[anchor]\ndefault_text = \"x\"\n";
+
+    fn rules_with_productive(apps: &str) -> nudge_core::rules::Rules {
+        let src = format!("{RULES_BARE}[classify]\nproductive_apps = [{apps}]\n");
+        nudge_core::rules::parse(&src).unwrap()
+    }
+
+    /// A temp sessions.db seeded with raw `task_tools` rows (nudge-app is the
+    /// writer in production, so the test stands in for it against the same schema).
+    fn db_with_tools(tag: &str, rows: &str) -> (persist::Db, std::path::PathBuf) {
+        let mut p = std::env::temp_dir();
+        p.push(format!("nudge-svc-test-{}-{tag}.db", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        let db = persist::Db::open(p.clone());
+        if !rows.is_empty() {
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            conn.execute_batch(rows).unwrap();
+        }
+        (db, p)
+    }
+
+    fn task_row(id: Option<i64>) -> Task {
+        Task {
+            id,
+            title: "t".into(),
+            desc: String::new(),
+            deadline: None,
+            task_type: String::new(),
+            minutes: None,
+            recur: nudge_core::tasks::Recur::Once,
+            mode_override: None,
+            task_source: nudge_core::tasks::TriggerSource::Manual,
+            gcal_event_id: None,
+            estimate_minutes: None,
+            logged_minutes: 0,
+        }
+    }
+
+    fn started(sample_at: Option<i64>) -> State {
+        State::Started {
+            checkin_at: None,
+            sample_at,
+            off_task_since: None,
+            ontask_at: None,
+            task_id: None,
+        }
+    }
+
+    // Sub-minute sample cadence (e.g. 20s test configs) must still accrue
+    // logged_minutes over several ticks rather than truncating to 0 forever
+    // (session-52 review finding c).
+    #[test]
+    fn sub_minute_cadence_accrues_over_multiple_ticks() {
+        let mut remainder = 0i64;
+        assert_eq!(accrue_logged_minutes(&mut remainder, 20), 0);
+        assert_eq!(remainder, 20);
+        assert_eq!(accrue_logged_minutes(&mut remainder, 20), 0);
+        assert_eq!(remainder, 40);
+        // Third tick crosses the 60s boundary: one whole minute flushes, 20s carries.
+        assert_eq!(accrue_logged_minutes(&mut remainder, 20), 1);
+        assert_eq!(remainder, 0);
+        assert_eq!(accrue_logged_minutes(&mut remainder, 20), 0);
+        assert_eq!(remainder, 20);
+    }
+
+    // The sample probe is paid for only on a due sample edge in Started.
+    #[test]
+    fn sample_due_gates_the_probe() {
+        assert!(sample_due(started(Some(1500)), 1500, &Event::EdgeTimer(1500)));
+        assert!(sample_due(started(Some(1500)), 1600, &Event::EdgeTimer(1600)));
+        // Not yet due.
+        assert!(!sample_due(started(Some(1500)), 1400, &Event::EdgeTimer(1400)));
+        // Sampling disabled → no edge to be due.
+        assert!(!sample_due(started(None), 9999, &Event::EdgeTimer(9999)));
+        // Not Started.
+        assert!(!sample_due(State::Idle, 9999, &Event::EdgeTimer(9999)));
+        assert!(!sample_due(
+            State::CheckIn { shown_at: 1, kind: CheckInKind::Periodic, task_id: None },
+            9999,
+            &Event::EdgeTimer(9999)
+        ));
+        // A user event is not a sampling edge.
+        assert!(!sample_due(started(Some(1500)), 1600, &Event::Ack(1600)));
+    }
+
+    // The §6.5 list is computed only while an answer of No could actually land —
+    // a drift check-in, or the list it already opened (which a reload re-emits).
+    #[test]
+    fn task_list_due_gates_the_display_list() {
+        assert!(task_list_due(State::CheckIn { shown_at: 1, kind: CheckInKind::OffTask, task_id: None }));
+        assert!(task_list_due(State::Choosing { shown_at: 1, task_id: None }));
+        // The periodic check-in takes Start/Skip, not Yes/No — no list to build.
+        assert!(!task_list_due(State::CheckIn { shown_at: 1, kind: CheckInKind::Periodic, task_id: None }));
+        assert!(!task_list_due(State::Idle));
+        assert!(!task_list_due(started(Some(1500))));
+        assert!(!task_list_due(State::Paused { resume_at: 9, was_started: true, task_id: None }));
+    }
+
+    // Progress comes off the rows already in hand: `logged_minutes` is the cache
+    // the sample edge maintains, so building the list re-reads nothing.
+    #[test]
+    fn progress_map_reads_the_logged_cache() {
+        let mut t = task_row(Some(7));
+        t.logged_minutes = 45;
+        t.estimate_minutes = Some(120);
+        // An unsaved row has no id, so it cannot key a map — and is skipped.
+        let m = progress_map(&[t, task_row(None)]);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[&7], Progress { logged: 45, estimate: Some(120) });
+    }
+
+    // A task's own tool list decides the compare, and an `ignore` app counts as
+    // on-task rather than drift.
+    #[test]
+    fn task_tools_drive_the_compare() {
+        let (db, path) = db_with_tools(
+            "tools",
+            "INSERT INTO task_tools (task_id, app_name, kind) VALUES
+                (1, 'code.exe', 'tool'), (1, 'slack.exe', 'ignore');",
+        );
+        // The global list would call code.exe off-task; the task list wins.
+        let rules = rules_with_productive("\"chrome.exe\"");
+
+        assert!(foreground_on_task(&db, &rules, Some(1), Some("code.exe")));
+        assert!(foreground_on_task(&db, &rules, Some(1), Some("CODE.EXE"))); // case-insensitive
+        assert!(foreground_on_task(&db, &rules, Some(1), Some("slack.exe"))); // ignore → not drift
+        assert!(!foreground_on_task(&db, &rules, Some(1), Some("game.exe")));
+        // chrome.exe is globally productive but not one of *this* task's tools.
+        assert!(!foreground_on_task(&db, &rules, Some(1), Some("chrome.exe")));
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // With no per-task tools yet (selector UI is Tier B), the global
+    // productive-app list stands in.
+    #[test]
+    fn falls_back_to_global_productive_apps() {
+        let (db, path) = db_with_tools("fallback", "");
+        let rules = rules_with_productive("\"code.exe\"");
+
+        assert!(foreground_on_task(&db, &rules, Some(1), Some("code.exe")));
+        assert!(!foreground_on_task(&db, &rules, Some(1), Some("game.exe")));
+        // A rules-only window (no task id) uses the same fallback.
+        assert!(foreground_on_task(&db, &rules, None, Some("code.exe")));
+        assert!(!foreground_on_task(&db, &rules, None, Some("game.exe")));
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // §6.4 broadened compare: on-task means "in ANY due-window task's tools",
+    // with the same never-nag fallbacks as the per-task compare.
+    #[test]
+    fn any_task_on_task_unions_due_window_tools() {
+        use nudge_core::task_window::{Row, StyleClass};
+        let row = |id: i64| Row {
+            task_id: id,
+            title: "t".into(),
+            deadline: Some(9_000),
+            logged: 0,
+            estimate: None,
+            style: StyleClass::NotStarted,
+        };
+        let (db, path) = db_with_tools(
+            "union",
+            "INSERT INTO task_tools (task_id, app_name, kind) VALUES
+                (1, 'code.exe', 'tool'), (2, 'word.exe', 'tool');",
+        );
+        let rules = rules_with_productive("\"chrome.exe\"");
+        let rows = [row(1), row(2)];
+
+        // Either task's tool counts; a stranger app does not (and the global
+        // list does NOT stand in once any task has tools).
+        assert!(any_task_on_task(&db, &rules, &rows, Some("code.exe")));
+        assert!(any_task_on_task(&db, &rules, &rows, Some("WORD.EXE")));
+        assert!(!any_task_on_task(&db, &rules, &rows, Some("game.exe")));
+        assert!(!any_task_on_task(&db, &rules, &rows, Some("chrome.exe")));
+
+        // No tools on any due task → global productive list stands in.
+        let bare_rows = [row(3)];
+        assert!(any_task_on_task(&db, &rules, &bare_rows, Some("chrome.exe")));
+        assert!(!any_task_on_task(&db, &rules, &bare_rows, Some("game.exe")));
+
+        // AW down, or nothing configured anywhere → on-task, never nag.
+        assert!(any_task_on_task(&db, &rules, &rows, None));
+        let bare = nudge_core::rules::parse(RULES_BARE).unwrap();
+        assert!(any_task_on_task(&db, &bare, &bare_rows, Some("anything.exe")));
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // The on-task probe is paid for only on a due tick in Started.
+    #[test]
+    fn ontask_due_gates_the_probe() {
+        let live = State::Started {
+            checkin_at: None,
+            sample_at: None,
+            off_task_since: None,
+            ontask_at: Some(3000),
+            task_id: None,
+        };
+        assert!(ontask_due(live, 3000, &Event::EdgeTimer(3000)));
+        assert!(!ontask_due(live, 2900, &Event::EdgeTimer(2900)));
+        assert!(!ontask_due(started(None), 9999, &Event::EdgeTimer(9999)));
+        assert!(!ontask_due(live, 3000, &Event::Ack(3000)));
+    }
+
+    // The two "we can't tell" paths both read as on-task, so we never nag on a
+    // signal we don't have.
+    #[test]
+    fn unknowable_foreground_reads_as_on_task() {
+        let (db, path) = db_with_tools("unknown", "");
+
+        // AW down: no foreground app at all.
+        let rules = rules_with_productive("\"code.exe\"");
+        assert!(foreground_on_task(&db, &rules, Some(1), None));
+
+        // Nothing configured anywhere: no tool list and no productive apps, so
+        // there is no notion of on-task to drift from — every app would otherwise
+        // count as drift and nag forever.
+        let bare = nudge_core::rules::parse(RULES_BARE).unwrap();
+        assert!(foreground_on_task(&db, &bare, Some(1), Some("game.exe")));
+        assert!(foreground_on_task(&db, &bare, None, Some("anything.exe")));
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+    }
 }
